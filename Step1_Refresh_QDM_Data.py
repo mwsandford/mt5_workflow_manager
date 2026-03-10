@@ -12,7 +12,6 @@ Example:
 Arguments:
     qdm_path    Full path to the qdmcli.exe executable.
 
-Test Comment
 """
 
 import argparse
