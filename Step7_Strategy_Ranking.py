@@ -2915,7 +2915,7 @@ body {
 
 /* Side Panel */
 .side-panel {
-  width: 520px; min-width: 520px;
+  width: 720px; min-width: 720px;
   background: var(--bg-secondary); border-left: 1px solid var(--border);
   margin-left: 16px; border-radius: var(--radius-lg);
   position: sticky; top: 76px; max-height: calc(100vh - 96px);
