@@ -198,6 +198,7 @@ def build_backtest_steps() -> list[WorkflowStep]:
                 "--model", "1",
                 "--from-date", s.MT5BackTestFrom,
                 "--to-date", s.MT5BackTestTo,
+                "--timeout", "900",
             ],
         ),
     ]
@@ -253,6 +254,7 @@ def build_tick_montecarlo_steps() -> list[WorkflowStep]:
             "--to-date", s.MT5BackTestTo,
             "--strategies-json", os.path.join(s.BacktestOutputFolder, "Dashboard", "strategies_data.json"),
             "--max-strategies", "10",
+            "--timeout", "1800",
         ]
     
     def build_tick_mc_args(s):
