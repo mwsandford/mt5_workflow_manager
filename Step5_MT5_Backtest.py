@@ -17,9 +17,10 @@ Parameters
 --mt5-data-folder   : MT5 data folder (found via File -> Open Data Folder in MT5)
 --mt5-ea-folder     : Folder containing compiled .ex5 EA files
 --report-dest-folder: Destination folder for completed HTML reports
---model             : Tick model for backtesting (0-4)
+--model             : Tick model for backtesting (0-4). Model: 0 = Every tick, 1 = 1 minute OHLC, 2 = Open price only, 3 = Math calculations, 4 = Every tick based on real ticks
 --from-date         : Backtest start date in YYYY.MM.DD format
 --to-date           : Backtest end date in YYYY.MM.DD format
+--timeout           : Maximum seconds to wait for each backtest before force-terminating (default: 900)
 
 Usage Examples
 --------------
@@ -49,6 +50,9 @@ Usage Examples
 6. Quick test with a short date range and fast model:
    python step6_mt5_backtest.py --model 1 --from-date 2025.01.01 --to-date 2025.03.31
 
+7. Set a custom timeout (20 minutes):
+   python step5_mt5_backtest.py --timeout 1200
+
 Tick Model Reference
 --------------------
 0 = Every tick
@@ -56,6 +60,15 @@ Tick Model Reference
 2 = Open price only
 3 = Math calculations
 4 = Every tick based on real ticks
+
+Known Issues
+------------
+MT5 occasionally hangs on the "saving report" dialog after a backtest completes.
+This script includes a timeout mechanism that:
+1. Monitors the MT5 process for the specified timeout period
+2. Checks if the report file was saved despite the hang
+3. Force-terminates MT5 if it doesn't exit gracefully
+4. Continues with the next EA in the queue
 """
 
 import argparse
@@ -65,6 +78,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 # =============================================================================
@@ -96,6 +110,7 @@ DEFAULT_REPORT_DEST_FOLDER = r"E:\Trading\Analysis_Ouput"
 DEFAULT_MODEL = 4
 DEFAULT_FROM_DATE = "2025.01.01"
 DEFAULT_TO_DATE = "2025.12.31"
+DEFAULT_TIMEOUT = 900  # 15 minutes - adjust based on typical backtest duration
 
 
 # =============================================================================
@@ -186,23 +201,95 @@ def create_ini_file(
     print_gray(f"  Created ini file: {ini_path}")
 
 
-def run_backtest(mt5_terminal_path: str, ini_path: str) -> int:
+def run_backtest(
+    mt5_terminal_path: str,
+    ini_path: str,
+    report_path: str,
+    timeout_seconds: int = 900,
+    check_interval: int = 5,
+) -> tuple[int, bool]:
     """
     Executes MT5 with the specified ini file and waits for completion.
 
+    Includes a timeout mechanism to handle the known MT5 issue where the
+    "saving report" dialog can hang. If MT5 doesn't exit within the timeout,
+    we check if the report file was created and force-kill the process.
+
+    Args:
+        mt5_terminal_path: Path to terminal64.exe
+        ini_path: Path to the backtest.ini file
+        report_path: Expected path of the report file (to check if save succeeded)
+        timeout_seconds: Maximum time to wait for MT5 (default: 900 seconds / 15 minutes)
+        check_interval: How often to check if process is done (default: 5 seconds)
+
     Returns:
-        Process exit code
+        Tuple of (exit_code, was_killed):
+            exit_code: 0 if successful, 1 if timeout/killed, -1 if error
+            was_killed: True if process was force-terminated due to timeout
     """
     print_gray("  Launching MT5 backtest...")
 
-    # Start MT5 and wait for it to complete (ShutdownTerminal=1 ensures it closes)
-    result = subprocess.run(
-        [mt5_terminal_path, f'/config:{ini_path}'],
-        capture_output=False,
-    )
+    # Record the report file's modification time if it exists (to detect new writes)
+    report_mtime_before = None
+    if os.path.exists(report_path):
+        report_mtime_before = os.path.getmtime(report_path)
 
-    print_gray(f"  Backtest completed (Exit code: {result.returncode})")
-    return result.returncode
+    # Start MT5 process
+    try:
+        process = subprocess.Popen(
+            [mt5_terminal_path, f'/config:{ini_path}'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        print_red(f"  ERROR: Failed to start MT5: {e}")
+        return -1, False
+
+    # Wait for process with timeout
+    elapsed = 0
+    while elapsed < timeout_seconds:
+        try:
+            # Check if process has finished
+            return_code = process.poll()
+            if return_code is not None:
+                print_gray(f"  Backtest completed (Exit code: {return_code})")
+                return return_code, False
+        except Exception as e:
+            print_yellow(f"  WARNING: Error checking process: {e}")
+
+        time.sleep(check_interval)
+        elapsed += check_interval
+
+        # Every 60 seconds, print a status update
+        if elapsed % 60 == 0:
+            print_gray(f"  Still running... ({format_duration(elapsed)} elapsed)")
+
+    # Timeout reached - check if report was saved
+    print_yellow(f"  WARNING: MT5 did not exit within {format_duration(timeout_seconds)}")
+
+    report_saved = False
+    if os.path.exists(report_path):
+        report_mtime_after = os.path.getmtime(report_path)
+        if report_mtime_before is None or report_mtime_after > report_mtime_before:
+            report_saved = True
+            print_yellow("  Report file was saved successfully despite hang")
+
+    # Force kill the MT5 process
+    print_yellow("  Force-terminating MT5 process...")
+    try:
+        process.terminate()
+        time.sleep(2)
+        if process.poll() is None:
+            process.kill()  # Force kill if terminate didn't work
+        print_gray("  MT5 process terminated")
+    except Exception as e:
+        print_yellow(f"  WARNING: Error terminating process: {e}")
+
+    if report_saved:
+        return 0, True  # Consider it successful since report was saved
+    else:
+        print_red("  ERROR: Report was not saved before timeout")
+        return 1, True
 
 
 def format_duration(seconds: float) -> str:
@@ -210,6 +297,20 @@ def format_duration(seconds: float) -> str:
     hours, remainder = divmod(int(seconds), 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def format_duration_friendly(seconds: float) -> str:
+    """Formats seconds into a friendly string like '1h 23m 45s'."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    elif minutes > 0:
+        return f"{minutes}m {secs}s"
+    else:
+        return f"{secs}s"
 
 
 def load_keep_strategies(json_path: str, max_strategies: int = 10) -> list[str]:
@@ -313,6 +414,7 @@ Examples:
   python step6_mt5_backtest.py
   python step6_mt5_backtest.py --from-date 2020.01.01 --to-date 2024.12.31
   python step6_mt5_backtest.py --model 1 --from-date 2025.01.01 --to-date 2025.03.31
+  python step6_mt5_backtest.py --timeout 1200
         """,
     )
 
@@ -354,6 +456,12 @@ Examples:
         help=f"Backtest end date in YYYY.MM.DD format (default: {DEFAULT_TO_DATE})",
     )
     parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help=f"Maximum seconds to wait for each backtest before force-terminating (default: {DEFAULT_TIMEOUT})",
+    )
+    parser.add_argument(
         "--strategies-json",
         default=None,
         help="Path to strategies_data.json to filter EAs to only top KEEP strategies (optional)",
@@ -381,9 +489,15 @@ Examples:
 def main() -> None:
     args = parse_arguments()
 
+    # Record start time
+    start_time = time.time()
+    start_datetime = datetime.now()
+
     print_cyan("============================================================")
     print_cyan("MT5 Batch Backtesting Script")
     print_cyan("============================================================")
+    print()
+    print(f"{Colours.CYAN}Started:{Colours.RESET} {Colours.GREEN}{start_datetime.strftime('%Y-%m-%d %H:%M:%S')}{Colours.RESET}")
     print()
 
     # Validate paths
@@ -453,6 +567,7 @@ def main() -> None:
     print_green(f"Found {len(ea_files)} EA(s) to backtest")
     print_gray(f"Model: {args.model} ({model_desc})")
     print_gray(f"Date Range: {args.from_date} to {args.to_date}")
+    print_gray(f"Timeout: {format_duration_friendly(args.timeout)} per backtest")
     print()
 
     # Path for the ini file - stored in MT5 data folder for reliability
@@ -460,8 +575,10 @@ def main() -> None:
 
     # Process each EA
     counter = 0
+    successful = 0
+    failed = 0
+    force_killed = 0
     total_eas = len(ea_files)
-    start_time = time.time()
 
     for ea_file in ea_files:
         counter += 1
@@ -474,6 +591,7 @@ def main() -> None:
 
         if parsed is None:
             print_yellow(f"  Skipping EA due to naming issue: {ea_file}")
+            failed += 1
             continue
 
         print_gray(f"  Symbol: {parsed['symbol']}.QDM | Timeframe: {parsed['timeframe']}")
@@ -489,10 +607,26 @@ def main() -> None:
             to_date=args.to_date,
         )
 
+        # Expected report path (for timeout detection)
+        report_filename = f"{parsed['base_name']} MT5.htm"
+        expected_report_path = os.path.join(reports_folder, report_filename)
+
         # Run the backtest
         bt_start = time.time()
-        run_backtest(args.mt5_terminal_path, ini_path)
+        result, was_killed = run_backtest(
+            mt5_terminal_path=args.mt5_terminal_path,
+            ini_path=ini_path,
+            report_path=expected_report_path,
+            timeout_seconds=args.timeout,
+        )
         bt_duration = time.time() - bt_start
+
+        if result == 0:
+            successful += 1
+            if was_killed:
+                force_killed += 1
+        else:
+            failed += 1
 
         print_gray(f"  Duration: {format_duration(bt_duration)}")
 
@@ -520,14 +654,24 @@ def main() -> None:
         print_yellow("WARNING: No report files found in: " + reports_folder)
 
     # Summary
+    end_datetime = datetime.now()
     total_duration = time.time() - start_time
+    duration_str = format_duration_friendly(total_duration)
+
     print()
     print_cyan("============================================================")
     print_cyan("SUMMARY")
     print_cyan("============================================================")
-    print(f"{Colours.WHITE}EAs Processed: {counter}{Colours.RESET}")
-    print(f"{Colours.WHITE}Total Duration: {format_duration(total_duration)}{Colours.RESET}")
-    print(f"{Colours.WHITE}Reports Location: {args.report_dest_folder}{Colours.RESET}")
+    print(f"{Colours.CYAN}EAs Processed:{Colours.RESET}    {Colours.GREEN}{counter}{Colours.RESET}")
+    print(f"{Colours.CYAN}Successful:{Colours.RESET}       {Colours.GREEN}{successful}{Colours.RESET}")
+    if force_killed > 0:
+        print(f"{Colours.CYAN}Force-killed:{Colours.RESET}     {Colours.YELLOW}{force_killed}{Colours.RESET} (report saved despite hang)")
+    if failed > 0:
+        print(f"{Colours.CYAN}Failed/Skipped:{Colours.RESET}  {Colours.RED}{failed}{Colours.RESET}")
+    print(f"{Colours.CYAN}Reports Location:{Colours.RESET} {Colours.GREEN}{args.report_dest_folder}{Colours.RESET}")
+    print()
+    print(f"{Colours.CYAN}Finished:{Colours.RESET}        {Colours.GREEN}{end_datetime.strftime('%Y-%m-%d %H:%M:%S')}{Colours.RESET}")
+    print(f"{Colours.CYAN}Total Duration:{Colours.RESET}  {Colours.GREEN}{duration_str}{Colours.RESET}")
     print()
 
     # Cleanup - remove temporary reports folder
