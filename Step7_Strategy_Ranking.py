@@ -3627,8 +3627,9 @@ JS_BLOCK = r"""
 
     // Build lookup for portfolio decisions
     const portfolioDecisions = {};
+    const portfolioReasons = {};
     if (DATA.portfolio) {
-      DATA.portfolio.forEach(p => { portfolioDecisions[p.name] = p.decision; });
+      DATA.portfolio.forEach(p => { portfolioDecisions[p.name] = p.decision; portfolioReasons[p.name] = p.reason || ''; });
     }
 
     const headers = [
@@ -3653,8 +3654,9 @@ JS_BLOCK = r"""
 
       // Show strategy name with ABANDON badge if applicable
       const decision = portfolioDecisions[r.name];
+      const abandonReason = portfolioReasons[r.name] || '';
       const nameDisplay = decision === 'ABANDON'
-        ? `<span class="abandon-name">${r.name}</span> <span class="tag tag-abandon" style="font-size:10px;padding:1px 6px;vertical-align:middle;">✗ ABANDON</span>`
+        ? `<span class="abandon-name">${r.name}</span> <span class="tag tag-abandon" title="${abandonReason.replace(/"/g, '&quot;')}" style="font-size:10px;padding:1px 6px;vertical-align:middle;cursor:help;">✗ ABANDON</span>`
         : r.name;
 
       const row = [
