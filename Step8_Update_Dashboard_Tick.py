@@ -133,18 +133,25 @@ def update_strategies_json(json_path: str, mc_results: dict) -> int:
     
     updated_count = 0
     
-    # Update ranking entries
+    # Update ranking entries (top 10 only)
+    top10_names = set()
     for strat in data.get('ranking', []):
+        rank = strat.get('rank', 999)
+        if rank > 10:
+            continue
         name = strat.get('name', '')
+        top10_names.add(name)
         mc95_tick = find_mc95_for_strategy(name, mc_results)
         if mc95_tick is not None:
             strat['mc95_ret_dd_tick'] = round(mc95_tick, 2)
             updated_count += 1
             print_gray(f"  Updated {name}: MC95 Tick = {mc95_tick:.2f}")
-    
-    # Update portfolio entries
+
+    # Update portfolio entries (only those in top 10)
     for strat in data.get('portfolio', []):
         name = strat.get('name', '')
+        if name not in top10_names:
+            continue
         mc95_tick = find_mc95_for_strategy(name, mc_results)
         if mc95_tick is not None:
             strat['mc95_ret_dd_tick'] = round(mc95_tick, 2)
@@ -192,9 +199,14 @@ def update_dashboard_html(html_path: str, mc_results: dict) -> int:
         print_red(f"  ERROR: Could not parse embedded DATA object: {e}")
         return 0
 
-    # Update ranking entries
+    # Update ranking entries (top 10 only)
+    top10_names = set()
     for strat in js_data.get('ranking', []):
+        rank = strat.get('rank', 999)
+        if rank > 10:
+            continue
         name = strat.get('name', '')
+        top10_names.add(name)
         mc95_tick = find_mc95_for_strategy(name, mc_results)
         if mc95_tick is not None:
             old_val = strat.get('mc95_ret_dd_tick')
@@ -202,9 +214,11 @@ def update_dashboard_html(html_path: str, mc_results: dict) -> int:
             updated_count += 1
             print_gray(f"  Ranking updated: {name} -> {mc95_tick:.2f} (was: {old_val})")
 
-    # Update portfolio entries
+    # Update portfolio entries (only those in top 10)
     for strat in js_data.get('portfolio', []):
         name = strat.get('name', '')
+        if name not in top10_names:
+            continue
         mc95_tick = find_mc95_for_strategy(name, mc_results)
         if mc95_tick is not None:
             strat['mc95_ret_dd_tick'] = round(mc95_tick, 2)
