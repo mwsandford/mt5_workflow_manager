@@ -313,45 +313,41 @@ def format_duration_friendly(seconds: float) -> str:
         return f"{secs}s"
 
 
-def load_keep_strategies(json_path: str, max_strategies: int = 10) -> list[str]:
+def load_top_strategies(json_path: str, max_strategies: int = 10) -> list[str]:
     """
-    Load top KEEP strategies from strategies_data.json.
-    
+    Load top ranked strategies from strategies_data.json.
+
     Args:
         json_path: Path to strategies_data.json
         max_strategies: Maximum number of strategies to return
-        
+
     Returns:
-        List of strategy names that should be backtested
+        List of strategy names that should be backtested (top N by rank)
     """
     if not os.path.exists(json_path):
         print_yellow(f"WARNING: Strategies JSON not found: {json_path}")
         return []
-    
+
     try:
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except Exception as e:
         print_yellow(f"WARNING: Could not load strategies JSON: {e}")
         return []
-    
+
     # Get ranking data (strategies sorted by composite score)
     ranking = data.get('ranking', [])
-    
-    # Get portfolio data to check KEEP vs ABANDON decisions
-    portfolio = data.get('portfolio', [])
-    keep_decisions = {p['name'] for p in portfolio if p.get('decision') == 'KEEP'}
-    
-    # Filter ranking to only KEEP strategies, up to max_strategies
-    keep_strategies = []
+
+    # Return top N ranked strategies regardless of KEEP/ABANDON decision
+    top_strategies = []
     for strat in ranking:
         name = strat.get('name', '')
-        if name in keep_decisions:
-            keep_strategies.append(name)
-            if len(keep_strategies) >= max_strategies:
+        if name:
+            top_strategies.append(name)
+            if len(top_strategies) >= max_strategies:
                 break
-    
-    return keep_strategies
+
+    return top_strategies
 
 
 def normalize_strategy_name(name: str) -> str:
@@ -464,7 +460,7 @@ Examples:
     parser.add_argument(
         "--strategies-json",
         default=None,
-        help="Path to strategies_data.json to filter EAs to only top KEEP strategies (optional)",
+        help="Path to strategies_data.json to filter EAs to only top ranked strategies (optional)",
     )
     parser.add_argument(
         "--max-strategies",
@@ -530,25 +526,25 @@ def main() -> None:
     # Filter EAs based on strategies_json if provided
     if args.strategies_json:
         print_gray(f"Loading strategies from: {args.strategies_json}")
-        keep_strategies = load_keep_strategies(args.strategies_json, args.max_strategies)
-        
-        if not keep_strategies:
-            print_yellow("WARNING: No KEEP strategies found in JSON. No EAs to backtest.")
+        top_strategies = load_top_strategies(args.strategies_json, args.max_strategies)
+
+        if not top_strategies:
+            print_yellow("WARNING: No strategies found in JSON. No EAs to backtest.")
             sys.exit(0)
-        
-        print_green(f"Found {len(keep_strategies)} KEEP strategies to backtest:")
-        for strat in keep_strategies:
+
+        print_green(f"Found {len(top_strategies)} top ranked strategies to backtest:")
+        for strat in top_strategies:
             print_gray(f"  - {strat}")
         print()
-        
-        # Filter EA files to only those matching KEEP strategies
+
+        # Filter EA files to only those matching top ranked strategies
         filtered_eas = []
         for ea in ea_files:
-            if match_ea_to_strategy(ea, keep_strategies):
+            if match_ea_to_strategy(ea, top_strategies):
                 filtered_eas.append(ea)
-        
+
         if not filtered_eas:
-            print_yellow("WARNING: No EA files match the KEEP strategies.")
+            print_yellow("WARNING: No EA files match the top ranked strategies.")
             print_gray("Available EAs:")
             for ea in ea_files[:10]:
                 print_gray(f"  - {ea}")
