@@ -114,22 +114,48 @@ OVERLAP_MODERATE = 0.40
 # ============================================================================
 # MT5 RANKING CONFIGURATION
 # ============================================================================
+# Weights reflect a tiered framework:
+#
+#   Tier 1 — Core quality (58%)
+#     Ret/DD Ratio    20%  Primary composite signal: return per unit of drawdown pain
+#     Profit Factor   16%  Purest measure of edge quality (gross profit / gross loss)
+#     Calmar Ratio    11%  CAGR / Max DD% — best single compounding quality number
+#     Sharpe Ratio    11%  Risk-adjusted return; penalises volatile equity curves
+#
+#   Tier 2 — Return shape (22%)
+#     CAGR             9%  Time-normalised compounding rate
+#     Expected Payoff  7%  Average $ edge per trade after costs
+#     LR Correlation   6%  Equity curve smoothness / linearity
+#
+#   Tier 3 — Overlap proxies, downweighted (13%)
+#     Balance DD Rel % 5%  Hard survivability check (inverted); partly redundant with Ret/DD
+#     Recovery Factor  4%  Weaker Ret/DD variant; kept for marginal signal
+#     Win/Loss Ratio   4%  Behaviour descriptor; useful context, weak alone
+#     Net Profit       2%  Distorted by test length & account size; subsumed by CAGR
+#     LR Std Error     2%  Equity curve noise; paired with LR Correlation (inverted)
+#     Win Rate %       3%  Misleading without payoff context; kept as minor tiebreaker
+#
+# NOTE: Total Trades is NOT scored here. It is a statistical validity gate, not a
+# quality signal. Apply a hard minimum before ranking: H1 >= 200, H4 >= 100 trades.
+# Scoring trade count rewards quantity over quality and distorts the composite score.
+
 MT5_HIGHER_IS_BETTER = {
-    "Total Net Profit":   0.15,
-    "Ret/DD Ratio":       0.15,
-    "Profit Factor":      0.10,
-    "Sharpe Ratio":       0.10,
-    "Recovery Factor":    0.10,
-    "LR Correlation":     0.10,
-    "Win/Loss Ratio":     0.05,
-    "Total Trades":       0.05,
-    "Expected Payoff":    0.05,
-    "Win Rate %":         0.05,
+    "Ret/DD Ratio":       0.20,
+    "Profit Factor":      0.16,
+    "Calmar Ratio":       0.11,
+    "Sharpe Ratio":       0.11,
+    "CAGR":               0.09,
+    "Expected Payoff":    0.07,
+    "LR Correlation":     0.06,
+    "Recovery Factor":    0.04,
+    "Win/Loss Ratio":     0.04,
+    "Total Net Profit":   0.02,
+    "Win Rate %":         0.03,
 }
 
 MT5_LOWER_IS_BETTER = {
     "Balance DD Rel %":   0.05,
-    "LR Standard Error":  0.05,
+    "LR Standard Error":  0.02,
 }
 
 MT5_FILE_PATTERNS = ['*.htm', '*.html']
@@ -236,6 +262,32 @@ def load_mc_results(csv_path, threshold=DEFAULT_MC95_THRESHOLD):
     return passing_names, mc95_data, mc_failed
 
 
+def load_mc_ranked(csv_path):
+    """Load MC_Ranked.csv (from MCFilterRejects / MCRankExport Java snippet).
+
+    Returns:
+        dict of {normalised_name: rank_int}
+    """
+    try:
+        df = pd.read_csv(csv_path, on_bad_lines='skip')
+        df = df.dropna(subset=['Strategy']).reset_index(drop=True)
+        result = {}
+        for _, row in df.iterrows():
+            name = str(row['Strategy']).strip()
+            rank = int(float(row['Rank'])) if pd.notna(row.get('Rank')) else 0
+            # Normalise the same way as MC results names
+            for suffix in [' MT5', ' MT4', '_MT5', '_MT4']:
+                if name.endswith(suffix):
+                    name = name[:-len(suffix)]
+            name = name.replace('_', ' ')
+            result[name] = rank
+        print(f"  Loaded MC ranks for {len(result)} strategies from {csv_path}")
+        return result
+    except Exception as e:
+        print(f"  WARNING: Could not load MC_Ranked.csv: {e}")
+        return {}
+
+
 def match_csv_to_mc(csv_name, mc_names):
     """Match a trade CSV strategy name to the MC results names.
 
@@ -275,6 +327,7 @@ def load_strategies(folder_path):
     # Exclude non-trade files
     csv_files = [f for f in csv_files if 'Correlation_Analysis' not in os.path.basename(f)]
     csv_files = [f for f in csv_files if 'BatchMC_Results' not in os.path.basename(f)]
+    csv_files = [f for f in csv_files if 'MC_Ranked' not in os.path.basename(f)]
 
     strategies = {}
     for filepath in csv_files:
@@ -409,6 +462,66 @@ def parse_mt5_report(filepath):
     # Win/Loss Ratio: Win count / Loss count (matches QA4)
     if metrics.get('Profit Trades') and metrics.get('Loss Trades') and metrics['Loss Trades'] > 0:
         metrics['Win/Loss Ratio'] = metrics['Profit Trades'] / metrics['Loss Trades']
+
+    # CAGR and Calmar Ratio: derived from the Deals table in the same HTML file.
+    # Parse the Deals table to get the initial balance and trade timeline, then
+    # compute CAGR = ((ending/starting)^(1/years) - 1) * 100
+    # Calmar = CAGR / Balance DD Rel % (higher is better — consistent with Ret/DD logic)
+    try:
+        deals_parser = _MT5DealsParser()
+        deals_parser.feed(content)
+        deals_start_idx = bal_col = dir_col = None
+        for i, row in enumerate(deals_parser.rows):
+            if len(row) >= 12:
+                bc = dc = None
+                for j, cell in enumerate(row):
+                    s = cell.strip()
+                    if s == 'Balance': bc = j
+                    if s == 'Direction': dc = j
+                if bc is not None and dc is not None:
+                    bal_col, dir_col, deals_start_idx = bc, dc, i
+                    break
+        if deals_start_idx is not None:
+            initial_bal = None
+            trade_rows = []
+            for row in deals_parser.rows[deals_start_idx + 1:]:
+                if len(row) < 12:
+                    if 6 <= len(row) <= 8 and len(row) > 2 and row[2].strip().lower() == 'balance':
+                        try:
+                            initial_bal = float(row[-1].replace(' ', '').replace('\xa0', ''))
+                        except (ValueError, TypeError):
+                            pass
+                    continue
+                if dir_col < len(row) and row[dir_col].strip().lower() != 'out':
+                    continue
+                dt = None
+                for fmt in ['%Y.%m.%d %H:%M:%S', '%Y.%m.%d %H:%M']:
+                    try:
+                        dt = pd.to_datetime(row[0], format=fmt)
+                        break
+                    except (ValueError, TypeError):
+                        continue
+                if dt is None:
+                    continue
+                try:
+                    bal = float(row[bal_col].replace(' ', '').replace('\xa0', ''))
+                    trade_rows.append((dt, bal))
+                except (ValueError, TypeError, IndexError):
+                    continue
+            if trade_rows and initial_bal and initial_bal > 0:
+                first_dt = trade_rows[0][0]
+                last_dt = trade_rows[-1][0]
+                last_bal = trade_rows[-1][1]
+                total_days = (last_dt - first_dt).days
+                total_years = total_days / 365.25 if total_days > 0 else 1
+                cagr = round(((last_bal / initial_bal) ** (1.0 / total_years) - 1) * 100, 2)
+                metrics['CAGR'] = cagr
+                # Calmar = CAGR / Max DD% (using Balance DD Rel % to match QA4)
+                dd_pct = metrics.get('Balance DD Rel %', 0)
+                if dd_pct and dd_pct > 0:
+                    metrics['Calmar Ratio'] = round(cagr / dd_pct, 4)
+    except Exception:
+        pass  # CAGR/Calmar unavailable for this report — ranking will normalise without them
 
     return metrics
 
@@ -1822,8 +1935,24 @@ def write_mt5_methodology_sheet(wb):
     for line in [
         'Strategies that pass Monte Carlo testing in StrategyQuant X are validated',
         'by running backtests in MetaTrader 5. The MT5 HTML reports are then parsed',
-        'to extract performance metrics, which are used to rank strategies using the',
-        'same percentile-based composite scoring methodology as the SQX databank ranker.',
+        'to extract performance metrics, which are ranked using a two-stage framework:',
+        '(1) hard pre-filters gate out statistically weak strategies before any scoring,',
+        '(2) surviving strategies receive a percentile-based composite score across',
+        'tiered metrics that prioritise risk-adjusted quality over raw profit.',
+    ]:
+        ws.cell(row=r, column=2, value=line).font = BODY_FONT
+        r += 1
+    r += 1
+
+    ws.cell(row=r, column=2, value='Pre-Filter Gates (applied before scoring)').font = SECTION_FONT
+    r += 1
+    for line in [
+        '\u2022 Minimum trades: H1 strategies \u2265 200 trades, H4 strategies \u2265 100 trades.',
+        '  Below threshold \u2192 discard. Do not score. Trade count is a validity gate, not a quality signal.',
+        '\u2022 OOS / Walk-forward: Net Profit must not degrade more than 40% vs in-sample.',
+        '  Fail \u2192 reject regardless of backtest score.',
+        '\u2022 Monte Carlo (MC95): Max DD at 95th percentile must remain within account risk tolerance.',
+        '  Fail \u2192 reject. (This gate is enforced upstream via --mc-results / --mc95-threshold.)',
     ]:
         ws.cell(row=r, column=2, value=line).font = BODY_FONT
         r += 1
@@ -1832,13 +1961,40 @@ def write_mt5_methodology_sheet(wb):
     ws.cell(row=r, column=2, value='Scoring Method').font = SECTION_FONT
     r += 1
     for line in [
-        'Each metric is converted to a percentile rank (0-1), then weighted and summed.',
-        'Metrics where lower is better (e.g. drawdown %) are inverted before weighting.',
-        'This ensures strategies must be consistently good across multiple dimensions.',
+        'Each metric is converted to a percentile rank (0\u20131), then weighted and summed.',
+        'Metrics where lower is better (e.g. drawdown %, LR Std Error) are inverted before weighting.',
+        'Missing metrics are excluded and remaining weights are renormalised automatically.',
+        'This ensures strategies must be consistently strong across multiple dimensions.',
     ]:
         ws.cell(row=r, column=2, value=line).font = BODY_FONT
         r += 1
     r += 1
+
+    ws.cell(row=r, column=2, value='Metric Weights').font = SECTION_FONT
+    r += 1
+
+    # Tier headers + rows
+    tiers = [
+        ('Tier 1 \u2014 Core Quality (58%)', [
+            ('Ret/DD Ratio',     '20%', 'Primary composite signal: net profit / max drawdown \u2014 return per unit of drawdown pain'),
+            ('Profit Factor',    '16%', 'Gross profit / gross loss \u2014 purest measure of edge quality'),
+            ('Calmar Ratio',     '11%', 'CAGR / Max DD% \u2014 best single compounding quality number; stable across test lengths'),
+            ('Sharpe Ratio',     '11%', 'Risk-adjusted return \u2014 penalises volatile/choppy equity curves'),
+        ]),
+        ('Tier 2 \u2014 Return Shape (22%)', [
+            ('CAGR',             '9%',  'Annualised compounding rate \u2014 time-normalised growth; avoids test-length distortion'),
+            ('Expected Payoff',  '7%',  'Average $ edge per trade after costs \u2014 directly measures per-trade profitability'),
+            ('LR Correlation',   '6%',  'Linear regression R of equity curve \u2014 measures curve smoothness and consistency'),
+        ]),
+        ('Tier 3 \u2014 Overlap Proxies / Context (20%)', [
+            ('Balance DD Rel %', '5%',  'Inverted \u2014 hard survivability check; partly redundant with Ret/DD but catches extreme cases'),
+            ('Recovery Factor',  '4%',  'Net profit / max drawdown variant \u2014 downweighted; largely captured by Ret/DD'),
+            ('Win/Loss Ratio',   '4%',  'Win count / loss count \u2014 behaviour descriptor; useful context, weak quality signal alone'),
+            ('Win Rate %',       '3%',  'Winning trade percentage \u2014 minor tiebreaker only; misleading without payoff context'),
+            ('Net Profit',       '2%',  'Absolute profit \u2014 minimal weight; distorted by test length and account size'),
+            ('LR Std Error',     '2%',  'Inverted \u2014 lower error = smoother equity curve; paired with LR Correlation'),
+        ]),
+    ]
 
     ws.cell(row=r, column=2, value='Metric').font = BOLD_FONT
     ws.cell(row=r, column=3, value='Weight').font = BOLD_FONT
@@ -1848,27 +2004,38 @@ def write_mt5_methodology_sheet(wb):
         ws.cell(row=r, column=c).border = THIN_BORDER
     r += 1
 
-    methodology_rows = [
-        ('Net Profit',       '15%', 'Absolute profitability \u2014 ensures the strategy generates meaningful returns'),
-        ('Ret/DD Ratio',     '15%', 'Net profit / max equity drawdown \u2014 risk-adjusted return quality'),
-        ('Profit Factor',    '10%', 'Gross profit / gross loss \u2014 measures overall reward-to-risk'),
-        ('Sharpe Ratio',     '10%', 'Risk-adjusted return considering volatility \u2014 penalises inconsistent curves'),
-        ('Recovery Factor',  '10%', 'Net profit / max drawdown \u2014 how quickly the strategy recovers from losses'),
-        ('LR Correlation',   '10%', 'Linear regression R of equity curve \u2014 measures equity curve smoothness/stability'),
-        ('Win/Loss Ratio',   '5%',  'Average win / average loss \u2014 reward-to-risk per trade'),
-        ('# Trades',         '5%',  'Statistical significance \u2014 more trades = more confidence in the edge'),
-        ('Expected Payoff',  '5%',  'Average P&L per trade \u2014 how much edge each trade provides'),
-        ('Win Rate %',       '5%',  'Percentage of winning trades \u2014 consistency of the edge'),
-        ('Max DD %',         '5%',  'Inverted \u2014 lower max drawdown percentage is better'),
-        ('LR Std Error',     '5%',  'Inverted \u2014 lower standard error = smoother equity curve'),
-    ]
-    for metric, weight, rationale in methodology_rows:
-        ws.cell(row=r, column=2, value=metric).font = BODY_FONT
-        ws.cell(row=r, column=3, value=weight).font = BODY_FONT
-        ws.cell(row=r, column=3).alignment = Alignment(horizontal='center')
-        ws.cell(row=r, column=4, value=rationale).font = BODY_FONT
+    tier_fill = PatternFill('solid', fgColor='EEF2F8')
+    for tier_label, rows in tiers:
+        # Tier header row
+        tc = ws.cell(row=r, column=2, value=tier_label)
+        tc.font = Font(name='Arial', size=10, bold=True, italic=True, color='2F5496')
+        tc.fill = tier_fill
         for c in [2, 3, 4]:
+            ws.cell(row=r, column=c).fill = tier_fill
             ws.cell(row=r, column=c).border = THIN_BORDER
+        r += 1
+        for metric, weight, rationale in rows:
+            ws.cell(row=r, column=2, value=metric).font = BODY_FONT
+            ws.cell(row=r, column=3, value=weight).font = BODY_FONT
+            ws.cell(row=r, column=3).alignment = Alignment(horizontal='center')
+            ws.cell(row=r, column=4, value=rationale).font = BODY_FONT
+            for c in [2, 3, 4]:
+                ws.cell(row=r, column=c).border = THIN_BORDER
+            r += 1
+
+    r += 1
+    ws.cell(row=r, column=2, value='Overlap Notes').font = SECTION_FONT
+    r += 1
+    for line in [
+        'Several metrics in this framework measure related concepts. Overlapping pairs are',
+        'deliberately downweighted so the composite score is not dominated by any single',
+        'underlying relationship:',
+        '  \u2022 Ret/DD, Recovery Factor, and Balance DD Rel % all involve drawdown \u2014 Ret/DD leads',
+        '  \u2022 Calmar and CAGR both involve compounding rate \u2014 Calmar leads (contextualised by risk)',
+        '  \u2022 LR Correlation and LR Std Error both describe equity curve quality \u2014 Corr leads',
+        '  \u2022 Net Profit is subsumed by CAGR (time-normalised) and Ret/DD (risk-adjusted)',
+    ]:
+        ws.cell(row=r, column=2, value=line).font = BODY_FONT
         r += 1
 
     r += 1
@@ -1887,7 +2054,8 @@ def write_mt5_methodology_sheet(wb):
         '\u2022 Metrics are parsed directly from MT5 Strategy Tester HTML reports',
         '\u2022 Reports must be in the same folder as the trade CSV files (or specified via --mt5-reports)',
         '\u2022 Strategy names are matched by normalising filenames (underscores / spaces / dots)',
-        '\u2022 Ret/DD Ratio and Win/Loss Ratio are computed from the parsed MT5 values',
+        '\u2022 Ret/DD Ratio, Win/Loss Ratio, CAGR, and Calmar Ratio are computed from parsed MT5 values',
+        '\u2022 CAGR and Calmar are derived from the Deals table in each MT5 HTML report',
         '\u2022 Weights are adjustable in the MT5_HIGHER_IS_BETTER / MT5_LOWER_IS_BETTER config at top of script',
     ]:
         ws.cell(row=r, column=2, value=note).font = BODY_FONT
@@ -1899,7 +2067,7 @@ def write_mt5_methodology_sheet(wb):
 def generate_report(folder_path, strategies, stats, names,
                     corr_daily, corr_weekly, corr_monthly,
                     overlap_data, clusters, mt5_folder=None,
-                    mc95_data=None, mc_failed=None):
+                    mc95_data=None, mc_failed=None, mc_rank_data=None):
     wb = Workbook()
     n = len(names)
 
@@ -2298,6 +2466,7 @@ def generate_report(folder_path, strategies, stats, names,
             strategy_scores=strategy_scores,
             strategy_codes=strategy_codes,
             sqx_metadata=sqx_metadata,
+            mc_rank_data=mc_rank_data,
         )
         dashboard_size = os.path.getsize(dashboard_path)
         print(f"  Dashboard saved to: {dashboard_path} ({dashboard_size:,} bytes)")
@@ -2342,7 +2511,7 @@ def generate_dashboard(folder_path, strategies, stats, names,
                        mt5_metrics=None, mt5_folder=None, chart_map=None,
                        mc95_data=None, mc_failed=None, mt5_overviews=None,
                        keep=None, abandon=None, strategy_scores=None,
-                       strategy_codes=None, sqx_metadata=None):
+                       strategy_codes=None, sqx_metadata=None, mc_rank_data=None):
     """Generate the HTML dashboard."""
 
     def _safe(val, decimals=2, as_int=False):
@@ -2384,6 +2553,18 @@ def generate_dashboard(folder_path, strategies, stats, names,
         chart_map = {}
     if mc95_data is None:
         mc95_data = {}
+    if mc_rank_data is None:
+        mc_rank_data = {}
+
+    def _get_mc_rank(name):
+        """Look up MC fan score rank for a strategy name."""
+        matched = match_csv_to_mc(name, set(mc_rank_data.keys()))
+        if matched and matched in mc_rank_data:
+            return mc_rank_data[matched]
+        norm = name.replace('_', ' ')
+        if norm in mc_rank_data:
+            return mc_rank_data[norm]
+        return None
 
     # Pre-encode equity chart PNGs as base64 data URIs
     # This makes the HTML self-contained (no external PNG dependencies)
@@ -2434,6 +2615,7 @@ def generate_dashboard(folder_path, strategies, stats, names,
         for _, row in ranked_df.iterrows():
             name = row.get('Strategy', '')
             mc = _get_mc95(name)
+            mc_rank = _get_mc_rank(name)
             ranking_data.append({
                 'rank': _safe(row.get('Rank', 0), as_int=True),
                 'name': name,
@@ -2443,6 +2625,7 @@ def generate_dashboard(folder_path, strategies, stats, names,
                 'ret_dd': _safe(row.get('Ret/DD Ratio', 0)),
                 'mc95_ret_dd': mc.get('mc95_ret_dd', 0),
                 'mc95_ret_dd_tick': None,  # Placeholder for tick-based MC95 Ret/DD (populated by Step9)
+                'mc_rank': mc_rank,
                 'wl_ratio': _safe(row.get('Win/Loss Ratio', 0)),
                 'pf': _safe(row.get('Profit Factor', 0)),
                 'sharpe': _safe(row.get('Sharpe Ratio', 0)),
@@ -3634,7 +3817,7 @@ JS_BLOCK = r"""
 
     const headers = [
       {label:'#'}, {label:'Strategy', text:true, rawHtml:true}, {label:'Score'}, {label:'Net Profit'},
-      {label:'Ret/DD'}, {label:'MC95 Ret/DD'}, {label:'MC95 Tick'}, {label:'W/L'}, {label:'PF'}, {label:'Sharpe'},
+      {label:'Ret/DD'}, {label:'MC95 Ret/DD'}, {label:'MC95 Tick'}, {label:'MC Rank'}, {label:'W/L'}, {label:'PF'}, {label:'Sharpe'},
       {label:'Recovery'}, {label:'LR Corr'}, {label:'Win%'}, {label:'Trades'},
       {label:'DD ($)'}, {label:'DD %'}, {label:'Analyze', noSort:true, rawHtml:true}
     ];
@@ -3661,7 +3844,7 @@ JS_BLOCK = r"""
 
       const row = [
         r.rank, nameDisplay, r.score, '$' + r.net_profit.toLocaleString(undefined, {minimumFractionDigits:2}),
-        r.ret_dd, r.mc95_ret_dd || '—', r.mc95_ret_dd_tick || '—', r.wl_ratio, r.pf, r.sharpe,
+        r.ret_dd, r.mc95_ret_dd || '—', r.mc95_ret_dd_tick || '—', r.mc_rank != null ? r.mc_rank : '—', r.wl_ratio, r.pf, r.sharpe,
         r.recovery, r.lr_corr, r.win_rate + '%', r.trades,
         '$' + r.dd_dollar.toLocaleString(undefined, {minimumFractionDigits:2}), r.dd_pct + '%',
         `<div class="btn-group">${ovBtn}${codeBtn}${chartBtn}${exportBtn}</div>`
@@ -3977,40 +4160,84 @@ JS_BLOCK = r"""
   // === Methodology Panel ===
   (function buildMethodology() {
     const el = $('#panel-methodology');
-    const weights = [
-      ['Net Profit', '15%', 'Absolute profitability — ensures the strategy generates meaningful returns'],
-      ['Ret/DD Ratio', '15%', 'Net profit / max equity drawdown — risk-adjusted return quality'],
-      ['Profit Factor', '10%', 'Gross profit / gross loss — measures overall reward-to-risk'],
-      ['Sharpe Ratio', '10%', 'Risk-adjusted return considering volatility — penalises inconsistent curves'],
-      ['Recovery Factor', '10%', 'Net profit / max drawdown — how quickly the strategy recovers from losses'],
-      ['LR Correlation', '10%', 'Linear regression R of equity curve — measures equity curve smoothness/stability'],
-      ['Win/Loss Ratio', '5%', 'Average win / average loss — reward-to-risk per trade'],
-      ['# Trades', '5%', 'Statistical significance — more trades = more confidence in the edge'],
-      ['Expected Payoff', '5%', 'Average P&L per trade — how much edge each trade provides'],
-      ['Win Rate %', '5%', 'Percentage of winning trades — consistency of the edge'],
-      ['Max DD %', '5%', 'Inverted — lower max drawdown percentage is better'],
-      ['LR Std Error', '5%', 'Inverted — lower standard error = smoother equity curve'],
+    const tiers = [
+      {
+        label: 'Tier 1 — Core Quality (58%)',
+        rows: [
+          ['Ret/DD Ratio',    '20%', 'Primary composite signal: net profit / max drawdown — return per unit of drawdown pain'],
+          ['Profit Factor',   '16%', 'Gross profit / gross loss — purest measure of edge quality'],
+          ['Calmar Ratio',    '11%', 'CAGR / Max DD% — best single compounding quality number; stable across test lengths'],
+          ['Sharpe Ratio',    '11%', 'Risk-adjusted return — penalises volatile / choppy equity curves'],
+        ]
+      },
+      {
+        label: 'Tier 2 — Return Shape (22%)',
+        rows: [
+          ['CAGR',            '9%',  'Annualised compounding rate — time-normalised growth; avoids test-length distortion'],
+          ['Expected Payoff', '7%',  'Average $ edge per trade after costs — directly measures per-trade profitability'],
+          ['LR Correlation',  '6%',  'Linear regression R of equity curve — measures curve smoothness and consistency'],
+        ]
+      },
+      {
+        label: 'Tier 3 — Overlap Proxies / Context (20%)',
+        rows: [
+          ['Balance DD Rel %','5%',  'Inverted — hard survivability check; partly redundant with Ret/DD but catches extreme cases'],
+          ['Recovery Factor', '4%',  'Net profit / max drawdown variant — downweighted; largely captured by Ret/DD'],
+          ['Win/Loss Ratio',  '4%',  'Win count / loss count — behaviour descriptor; useful context, weak quality signal alone'],
+          ['Win Rate %',      '3%',  'Winning trade % — minor tiebreaker only; misleading without payoff context'],
+          ['Net Profit',      '2%',  'Absolute profit — minimal weight; distorted by test length and account size'],
+          ['LR Std Error',    '2%',  'Inverted — lower error = smoother equity curve; paired with LR Correlation'],
+        ]
+      },
     ];
+
+    const tableRows = tiers.map(tier => {
+      const tierHeader = `<tr style="background:#eef2f8"><td colspan="3" style="padding:6px 10px;font-weight:600;color:#2F5496;font-style:italic">${tier.label}</td></tr>`;
+      const metricRows = tier.rows.map(([m,w,r]) =>
+        `<tr><td>${m}</td><td style="text-align:center">${w}</td><td>${r}</td></tr>`
+      ).join('');
+      return tierHeader + metricRows;
+    }).join('');
 
     el.innerHTML = `
       <div class="section-header">MT5 Backtest Ranking Methodology</div>
 
       <div class="meth-section">
         <div class="meth-heading">Overview</div>
-        <p>Strategies that pass Monte Carlo testing in StrategyQuant X are validated by running backtests in MetaTrader 5. The MT5 HTML reports are then parsed to extract performance metrics, which are used to rank strategies using a percentile-based composite scoring methodology.</p>
+        <p>Strategies that pass Monte Carlo testing in StrategyQuant X are validated by running backtests in MetaTrader 5. The MT5 HTML reports are then parsed to extract performance metrics, which are ranked using a two-stage framework: (1) hard pre-filters gate out statistically weak strategies before any scoring; (2) surviving strategies receive a percentile-based composite score across tiered metrics that prioritise risk-adjusted quality over raw profit.</p>
+      </div>
+
+      <div class="meth-section">
+        <div class="meth-heading">Pre-Filter Gates (applied before scoring)</div>
+        <ul class="meth-notes">
+          <li><strong>Minimum trades:</strong> H1 strategies &ge;200 trades, H4 strategies &ge;100 trades. Below threshold &rarr; discard. Trade count is a statistical validity gate, not a quality signal &mdash; scoring it rewards quantity over quality.</li>
+          <li><strong>OOS / Walk-forward:</strong> Net Profit must not degrade more than 40% vs in-sample. Fail &rarr; reject regardless of backtest score.</li>
+          <li><strong>Monte Carlo (MC95):</strong> Max DD at 95th percentile must remain within account risk tolerance. Fail &rarr; reject. (Enforced upstream via <code>--mc-results</code> / <code>--mc95-threshold</code>.)</li>
+        </ul>
       </div>
 
       <div class="meth-section">
         <div class="meth-heading">Scoring Method</div>
-        <p>Each metric is converted to a percentile rank (0–1), then weighted and summed. Metrics where lower is better (e.g. drawdown %) are inverted before weighting. This ensures strategies must be consistently good across multiple dimensions.</p>
+        <p>Each metric is converted to a percentile rank (0–1), then weighted and summed. Metrics where lower is better (e.g. drawdown %, LR Std Error) are inverted before weighting. Missing metrics are excluded and remaining weights are renormalised automatically. This ensures strategies must be consistently strong across multiple dimensions.</p>
       </div>
 
       <div class="meth-section">
         <div class="meth-heading">Metric Weights</div>
         <table class="meth-table">
           <thead><tr><th>Metric</th><th>Weight</th><th>Rationale</th></tr></thead>
-          <tbody>${weights.map(([m,w,r]) => `<tr><td>${m}</td><td style="text-align:center">${w}</td><td>${r}</td></tr>`).join('')}</tbody>
+          <tbody>${tableRows}</tbody>
         </table>
+      </div>
+
+      <div class="meth-section">
+        <div class="meth-heading">Overlap Notes</div>
+        <p>Several metrics measure related concepts and are deliberately downweighted to prevent any single relationship from dominating the score:</p>
+        <ul class="meth-notes">
+          <li>Ret/DD, Recovery Factor, and Balance DD Rel % all involve drawdown &mdash; Ret/DD leads at 20%</li>
+          <li>Calmar and CAGR both involve compounding rate &mdash; Calmar leads (CAGR contextualised by risk)</li>
+          <li>LR Correlation and LR Std Error both describe equity curve quality &mdash; Correlation leads</li>
+          <li>Net Profit is subsumed by CAGR (time-normalised) and Ret/DD (risk-adjusted) &mdash; 2% only</li>
+        </ul>
       </div>
 
       <div class="meth-section">
@@ -4028,7 +4255,8 @@ JS_BLOCK = r"""
           <li>Metrics are parsed directly from MT5 Strategy Tester HTML reports</li>
           <li>Reports must be in the same folder as the trade CSV files (or specified via <code>--mt5-reports</code>)</li>
           <li>Strategy names are matched by normalising filenames (underscores / spaces / dots)</li>
-          <li>Ret/DD Ratio and Win/Loss Ratio are computed from the parsed MT5 values</li>
+          <li>Ret/DD Ratio, Win/Loss Ratio, CAGR, and Calmar Ratio are computed from the parsed MT5 values</li>
+          <li>CAGR and Calmar are derived from the Deals table embedded in each MT5 HTML report</li>
           <li>Weights are adjustable in the <code>MT5_HIGHER_IS_BETTER</code> / <code>MT5_LOWER_IS_BETTER</code> config at top of script</li>
         </ul>
       </div>
@@ -4049,6 +4277,7 @@ def main():
     mt5_folder = None
     mc_results_path = None
     mc95_threshold = DEFAULT_MC95_THRESHOLD
+    mc_ranked_path = None
 
     args = sys.argv[1:]
     i = 0
@@ -4058,6 +4287,9 @@ def main():
             i += 2
         elif args[i] == '--mc-results' and i + 1 < len(args):
             mc_results_path = args[i + 1]
+            i += 2
+        elif args[i] == '--mc-ranked' and i + 1 < len(args):
+            mc_ranked_path = args[i + 1]
             i += 2
         elif args[i] == '--mc95-threshold' and i + 1 < len(args):
             mc95_threshold = float(args[i + 1])
@@ -4106,6 +4338,19 @@ def main():
         print(f"  -> {len(mc_passing_names)} strategies passed MC filter")
     else:
         print("\n  No --mc-results provided - analysing all trade CSVs")
+
+    # Auto-detect MC_Ranked.csv in the folder if not explicitly provided
+    if mc_ranked_path is None:
+        auto_ranked = os.path.join(folder_path, 'MC_Ranked.csv')
+        if os.path.isfile(auto_ranked):
+            mc_ranked_path = auto_ranked
+            print(f"\n  Auto-detected MC_Ranked.csv in folder")
+
+    mc_rank_data = {}
+    if mc_ranked_path:
+        mc_ranked_path = os.path.abspath(mc_ranked_path)
+        print(f"\nLoading MC Ranked data: {mc_ranked_path}")
+        mc_rank_data = load_mc_ranked(mc_ranked_path)
 
     print()
 
@@ -4204,6 +4449,7 @@ def main():
         corr_daily, corr_weekly, corr_monthly,
         overlap_data, clusters, mt5_folder=mt5_folder,
         mc95_data=mc95_data, mc_failed=mc_failed,
+        mc_rank_data=mc_rank_data,
     )
 
     print(f"\n{Colors.CYAN}{'=' * 60}{Colors.RESET}")

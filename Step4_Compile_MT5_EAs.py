@@ -33,6 +33,9 @@ Usage Examples:
     # Include custom include path (point to MQL5 folder, NOT MQL5\\Include - MetaEditor adds \\Include automatically)
     python step5_compile_mt5_eas.py -s "D:\\Strategies" -i "C:\\Users\\Mark\\MT5\\MQL5"
 
+    # Clear stale Tester .set cache before compiling (fixes wrong parameter values in backtests)
+    python step5_compile_mt5_eas.py -s "D:\\Strategies" -e "C:\\Users\\Mark\\MT5\\MQL5\\Experts\\MyStrats" -t "C:\\Users\\Mark\\AppData\\Roaming\\MetaQuotes\\Terminal\\<instance_id>\\MQL5\\Profiles\\Tester"
+
     # Show help
     python step5_compile_mt5_eas.py --help
 
@@ -44,6 +47,10 @@ Arguments:
     -e, --ea-folder         Local path to deploy compiled .ex5 files (e.g. MT5 Experts folder).
                             Existing .ex5 files are deleted, then source .mq5 files are copied
                             here for compilation and cleaned up afterward.
+    -t, --tester-profile    Path to MT5 Tester profiles folder whose cached .set files should be
+                            deleted before compilation. Stale .set files cause the Strategy Tester
+                            to use old parameter values (e.g. wrong lot size) instead of EA defaults.
+                            Typically: %AppData%\\MetaQuotes\\Terminal\\<instance_id>\\MQL5\\Profiles\\Tester
 """
 
 import argparse
@@ -189,6 +196,15 @@ def main():
         default=None,
         help='Local path to deploy compiled .ex5 files (e.g. MT5 Experts folder)'
     )
+    parser.add_argument(
+        '-t', '--tester-profile',
+        type=Path,
+        default=None,
+        help=(
+            'Path to MT5 Tester profiles folder to clear cached .set files before compilation. '
+            'Typically: %%AppData%%\\MetaQuotes\\Terminal\\<instance_id>\\MQL5\\Profiles\\Tester'
+        )
+    )
     
     args = parser.parse_args()
     
@@ -245,7 +261,45 @@ def main():
     if error_log_path.exists():
         error_log_path.unlink()
         print_color("Removed existing log file", Colors.GRAY)
-    
+
+    # Clear cached .set files from the MT5 Tester profiles folder.
+    # Stale .set files cause the Strategy Tester to use old parameter values
+    # (e.g. mmLots = 1.0) instead of the EA's compiled defaults.
+    # Only .set files are deleted — .ini files (e.g. Custom_Strategy_Tester_Settings.ini)
+    # and subfolders (e.g. Groups) are intentionally preserved.
+    if args.tester_profile:
+        tester_folder = Path(os.path.normpath(args.tester_profile))
+        if tester_folder.exists() and tester_folder.is_dir():
+            # Delete all files starting with "SQ " (covers both .set and .ini SQ strategy files).
+            # Preserves manually created files (e.g. CommercialsIndex.set, Moving Average.set,
+            # Custom_Strategy_Tester_Settings.ini) and subfolders (e.g. Groups).
+            sq_files = [f for f in tester_folder.iterdir() if f.is_file() and f.name.startswith("SQ ")]
+            if sq_files:
+                print_color(
+                    f"Clearing {len(sq_files)} cached SQ file(s) from Tester profiles folder...",
+                    Colors.CYAN
+                )
+                cleared = 0
+                skipped = 0
+                for f in sq_files:
+                    try:
+                        f.unlink()
+                        cleared += 1
+                    except Exception as e:
+                        print_color(f"  Skipped {f.name}: {e}", Colors.YELLOW)
+                        skipped += 1
+                msg = f"  Cleared {cleared} SQ file(s)"
+                if skipped:
+                    msg += f", skipped {skipped} (in use?)"
+                print_color(msg, Colors.GREEN)
+            else:
+                print_color("No SQ files found in Tester profiles folder", Colors.GRAY)
+        else:
+            print_color(
+                f"Tester profiles folder not found, skipping: {tester_folder}",
+                Colors.YELLOW
+            )
+
     print_color(f"Using MetaEditor: {metaeditor_path}", Colors.CYAN)
     print_color(f"Source folder: {source_folder}", Colors.CYAN)
     if ea_folder:

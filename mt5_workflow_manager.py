@@ -185,6 +185,7 @@ def build_backtest_steps() -> list[WorkflowStep]:
                 "-m", s.MT5Folder,
                 "-i", s.MT5MQL5Folder,
                 "-e", os.path.join(s.MT5MQL5Folder, "Experts", "Advisors", "PineappleStrats"),
+                "-t", os.path.join(s.MT5MQL5Folder, "Profiles", "Tester"),
             ],
         ),
         WorkflowStep(
