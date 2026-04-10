@@ -214,6 +214,9 @@ def load_mc_results(csv_path, threshold=DEFAULT_MC95_THRESHOLD):
         for suffix in [' MT5', ' MT4', '_MT5', '_MT4']:
             if name.endswith(suffix):
                 name = name[:-len(suffix)]
+        # Convert SQX duplicate-suffix parentheses "(1)" to "_1_" so they
+        # match trade-CSV filenames where parens become underscores.
+        name = re.sub(r'\((\d+)\)', r'_\1_', name)
         name = name.replace('_', ' ')
         return name
 
@@ -279,6 +282,9 @@ def load_mc_ranked(csv_path):
             for suffix in [' MT5', ' MT4', '_MT5', '_MT4']:
                 if name.endswith(suffix):
                     name = name[:-len(suffix)]
+            # Convert SQX duplicate-suffix parentheses "(1)" to "_1_" so they
+            # match trade-CSV filenames where parens become underscores.
+            name = re.sub(r'\((\d+)\)', r'_\1_', name)
             name = name.replace('_', ' ')
             result[name] = rank
         print(f"  Loaded MC ranks for {len(result)} strategies from {csv_path}")
@@ -2566,6 +2572,21 @@ def generate_dashboard(folder_path, strategies, stats, names,
             return mc_rank_data[norm]
         return None
 
+    def _get_direction(name):
+        """Resolve strategy direction.
+
+        The Type column in SQX trade-list CSVs reflects the MT5 closing-deal
+        side (Sell when closing a long), so deriving direction from it via
+        compute_strategy_stats produces a misleading 'Short Only' for long-
+        only strategies. The pseudo-code parser already extracts the true
+        direction from the .txt source, so prefer that when available.
+        """
+        if strategy_codes and name in strategy_codes:
+            d = strategy_codes[name].get('direction')
+            if d and d != 'Unknown':
+                return d
+        return stats[name]['direction']
+
     # Pre-encode equity chart PNGs as base64 data URIs
     # This makes the HTML self-contained (no external PNG dependencies)
     import base64
@@ -2599,7 +2620,7 @@ def generate_dashboard(folder_path, strategies, stats, names,
             'trades': s['trades'],
             'long': s['long'],
             'short': s['short'],
-            'direction': s['direction'],
+            'direction': _get_direction(name),
             'win_rate': round(s['win_rate'] * 100, 1),
             'avg_trade': round(s['avg_trade'], 2),
             'total_pnl': round(s['total_pnl'], 2),
@@ -2655,7 +2676,7 @@ def generate_dashboard(folder_path, strategies, stats, names,
         portfolio_data.append({
             'name': name, 'decision': 'KEEP', 'cluster': cid,
             'reason': reason,
-            'direction': s['direction'],
+            'direction': _get_direction(name),
             'total_pnl': round(s['total_pnl'], 2),
             'avg_trade': round(s['avg_trade'], 2),
             'win_rate': round(s['win_rate'] * 100, 1),
@@ -2676,7 +2697,7 @@ def generate_dashboard(folder_path, strategies, stats, names,
         portfolio_data.append({
             'name': name, 'decision': 'ABANDON', 'cluster': cid,
             'reason': reason,
-            'direction': s['direction'],
+            'direction': _get_direction(name),
             'total_pnl': round(s['total_pnl'], 2),
             'avg_trade': round(s['avg_trade'], 2),
             'win_rate': round(s['win_rate'] * 100, 1),

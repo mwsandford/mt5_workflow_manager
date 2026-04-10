@@ -216,7 +216,7 @@ def build_montecarlo_steps() -> list[WorkflowStep]:
         if s.QAUseImages:
             args.append("--use-images")
         return args
-    
+
     return [
         WorkflowStep(
             id="run_mc_analysis",

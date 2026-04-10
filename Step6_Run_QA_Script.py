@@ -46,6 +46,7 @@ import ctypes
 import sys
 import os
 import time
+from contextlib import contextmanager
 from datetime import datetime
 
 # Disable PyAutoGUI failsafe globally - required for unattended RDP automation
@@ -91,20 +92,47 @@ def format_duration(seconds: float) -> str:
 
 
 # ============================================================================
+# SLEEP / SCREENSAVER PREVENTION
+# ============================================================================
+# Windows SetThreadExecutionState flags
+ES_CONTINUOUS = 0x80000000
+ES_SYSTEM_REQUIRED = 0x00000001
+ES_DISPLAY_REQUIRED = 0x00000002
+
+
+@contextmanager
+def prevent_sleep():
+    """Prevent Windows screensaver and display-off during automation.
+
+    Uses SetThreadExecutionState to tell Windows the system is in use,
+    keeping the desktop session alive even without user input.
+    """
+    flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+    ctypes.windll.kernel32.SetThreadExecutionState(flags)
+    print(f"  {Colors.GREEN}Sleep/screensaver prevention enabled{Colors.RESET}")
+    try:
+        yield
+    finally:
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+        print(f"  Sleep/screensaver prevention released")
+
+
+# ============================================================================
 # QUANT ANALYZER AUTOMATION
 # ============================================================================
 DEFAULT_QA_PATH = r"C:\QuantAnalyzer4\QuantAnalyzer4.exe"
 DEFAULT_TIMEOUT = 3600  # 60 minutes
 
 # Keyboard/mouse automation settings for Java app fallback
-# These offsets are relative to the window position
-SCRIPTER_CLICK_X_OFFSET = 60   # X offset from left edge of window to Scripter icon
-SCRIPTER_CLICK_Y_OFFSET = 1076 # Y offset from top of window to Scripter icon
-RUN_BUTTON_X_OFFSET = 200      # X offset to Run button in Scripter panel
-RUN_BUTTON_Y_OFFSET = 256      # Y offset to Run button
-NAVIGATOR_X_OFFSET = 1430      # X offset to Navigator scripts list (middle of script names)
-NAVIGATOR_Y_OFFSET = 385       # Y offset to FIRST script in Navigator list
-SCRIPT_ROW_HEIGHT = 30         # Pixels between each script row in the list
+# These offsets are relative to the QA window's top-left corner (non-maximized).
+# Measured from screenshot where QA opens at its default fixed position/size.
+SCRIPTER_CLICK_X_OFFSET = 42   # X offset from left edge of window to Scripter icon
+SCRIPTER_CLICK_Y_OFFSET = 737  # Y offset from top of window to Scripter icon
+RUN_BUTTON_X_OFFSET = 142      # X offset to Run button in Scripter panel
+RUN_BUTTON_Y_OFFSET = 193      # Y offset to Run button
+NAVIGATOR_X_OFFSET = 970       # X offset to Navigator scripts list (middle of script names)
+NAVIGATOR_Y_OFFSET = 281       # Y offset to FIRST script in Navigator list
+SCRIPT_ROW_HEIGHT = 20         # Pixels between each script row in the list
 
 
 def check_pywinauto():
@@ -256,24 +284,19 @@ def capture_templates(qa_path: str):
         print(f"{Colors.RED}Could not find Quant Analyzer window{Colors.RESET}")
         return
     
-    # Get window position first
+    # Get window position (QA opens at a fixed position/size — do NOT maximize)
     rect = main_window.rectangle()
-    
-    # Bring to focus by clicking on the window title bar area, then maximize
-    print("Maximizing window...")
+
+    # Bring to focus by clicking on the window title bar area
+    print("Bringing window to front...")
     try:
-        # Click on the window to ensure it has focus (click near top-center of window)
         click_x = rect.left + (rect.right - rect.left) // 2
         click_y = rect.top + 15  # Title bar area
         pyautogui.click(click_x, click_y)
-        time.sleep(0.3)
-        
-        # Now send Win+Up to maximize
-        pyautogui.hotkey('win', 'up')
-        time.sleep(1)
+        time.sleep(0.5)
     except Exception as e:
-        print(f"{Colors.YELLOW}Warning: Could not maximize window: {e}{Colors.RESET}")
-    
+        print(f"{Colors.YELLOW}Warning: Could not bring window to front: {e}{Colors.RESET}")
+
     print(f"Window: {main_window.window_text()}")
     print()
     
@@ -712,59 +735,52 @@ def inspect_ui(qa_path: str):
         else:
             print(f"  {Colors.RED}pyautogui is NOT installed{Colors.RESET}")
             print(f"  Install it with: pip install pyautogui")
-    else:
-        # Try to print control tree for non-Java apps
-        print(f"\n{Colors.CYAN}Control Tree (first 3 levels):{Colors.RESET}")
-        try:
-            main_window.print_control_identifiers(depth=3)
-        except Exception as e:
-            print(f"  Error printing tree: {e}")
-        
-        print(f"\n{Colors.YELLOW}Looking for key elements...{Colors.RESET}")
-        
-        # Look for Scripter
-        print(f"\n  Scripter-related elements:")
-        try:
-            all_elements = main_window.descendants()
-            scripter_items = [e for e in all_elements if 'scripter' in e.window_text().lower()]
-            for item in scripter_items[:10]:
-                try:
-                    print(f"    - '{item.window_text()}' ({item.element_info.control_type})")
-                except Exception:
-                    pass
-            if not scripter_items:
-                print(f"    (none found)")
-        except Exception as e:
-            print(f"    Error: {e}")
-        
-        # Look for Run button
-        print(f"\n  Run/Stop buttons:")
-        try:
-            buttons = main_window.descendants(control_type="Button")
-            for btn in buttons:
-                try:
-                    text = btn.window_text()
-                    if text and ("Run" in text or "Stop" in text):
-                        print(f"    - '{text}' (Button, enabled={btn.is_enabled()})")
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"    Error: {e}")
-        
-        # Look for Navigator/script list
-        print(f"\n  List/Tree items (potential script list):")
-        try:
-            items = main_window.descendants(control_type="ListItem")
-            items += main_window.descendants(control_type="TreeItem")
-            for item in items[:20]:
-                try:
-                    text = item.window_text()
-                    if text and ".java" in text:
-                        print(f"    - '{text}' ({item.element_info.control_type})")
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"    Error: {e}")
+
+    print(f"\n{Colors.YELLOW}Looking for key elements...{Colors.RESET}")
+
+    # Look for Scripter
+    print(f"\n  Scripter-related elements:")
+    try:
+        all_elements = main_window.descendants()
+        scripter_items = [e for e in all_elements if 'scripter' in e.window_text().lower()]
+        for item in scripter_items[:10]:
+            try:
+                print(f"    - '{item.window_text()}' ({item.element_info.control_type})")
+            except Exception:
+                pass
+        if not scripter_items:
+            print(f"    (none found)")
+    except Exception as e:
+        print(f"    Error: {e}")
+
+    # Look for Run button
+    print(f"\n  Run/Stop buttons:")
+    try:
+        buttons = main_window.descendants(control_type="Button")
+        for btn in buttons:
+            try:
+                text = btn.window_text()
+                if text and ("Run" in text or "Stop" in text):
+                    print(f"    - '{text}' (Button, enabled={btn.is_enabled()})")
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"    Error: {e}")
+
+    # Look for Navigator/script list
+    print(f"\n  List/Tree items (potential script list):")
+    try:
+        items = main_window.descendants(control_type="ListItem")
+        items += main_window.descendants(control_type="TreeItem")
+        for item in items[:20]:
+            try:
+                text = item.window_text()
+                if text and ".java" in text:
+                    print(f"    - '{text}' ({item.element_info.control_type})")
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"    Error: {e}")
     
     print(f"\n{Colors.GREEN}Inspection complete.{Colors.RESET}")
     print(f"{Colors.YELLOW}Press Enter to close Quant Analyzer (or Ctrl+C to keep it open)...{Colors.RESET}")
@@ -809,25 +825,15 @@ def calibrate_positions(qa_path: str):
     win_left = rect.left
     win_top = rect.top
     
-    # Maximize the window for consistent calibration (click to focus, then use keyboard)
-    print("Maximizing window...")
+    # Bring window to front (do NOT maximize — QA opens at a fixed position/size)
+    print("Bringing window to front...")
     try:
-        # Click on the window to ensure it has focus (click near top-center of window)
         click_x = rect.left + (rect.right - rect.left) // 2
         click_y = rect.top + 15  # Title bar area
         pyautogui.click(click_x, click_y)
-        time.sleep(0.3)
-        
-        # Now send Win+Up to maximize
-        pyautogui.hotkey('win', 'up')
-        time.sleep(1)
+        time.sleep(0.5)
     except Exception as e:
-        print(f"{Colors.YELLOW}Warning: Could not maximize window: {e}{Colors.RESET}")
-    
-    # Get window position AFTER maximizing
-    rect = main_window.rectangle()
-    win_left = rect.left
-    win_top = rect.top
+        print(f"{Colors.YELLOW}Warning: Could not bring window to front: {e}{Colors.RESET}")
     
     # Get screen size
     screen_width, screen_height = pyautogui.size()
@@ -836,8 +842,6 @@ def calibrate_positions(qa_path: str):
     print(f"Window position: Left={win_left}, Top={win_top}")
     print(f"Window size: {rect.right - rect.left} x {rect.bottom - rect.top}")
     print(f"Screen size: {screen_width} x {screen_height}")
-    print()
-    print(f"{Colors.YELLOW}NOTE: Window has been maximized. Calibrate with maximized window.{Colors.RESET}")
     print()
     print(f"{Colors.YELLOW}Move your mouse to each UI element and note the OFFSET values:{Colors.RESET}")
     print(f"  1. Scripter icon (left menu, near bottom)")
@@ -871,9 +875,10 @@ def calibrate_positions(qa_path: str):
         print(f"  SCRIPT_ROW_HEIGHT = <pixels between script rows, usually ~23>")
 
 
-def run_qa_script(script_name: str, qa_path: str, keep_open: bool, timeout: int, output_folder: str = None, use_images: bool = False):
+def run_qa_script(script_name: str, qa_path: str, keep_open: bool, timeout: int,
+                  output_folder: str = None, use_images: bool = False):
     """Main function to run a script in Quant Analyzer.
-    
+
     Args:
         script_name: Name of the Java script to run
         qa_path: Path to QuantAnalyzer4.exe
@@ -884,76 +889,64 @@ def run_qa_script(script_name: str, qa_path: str, keep_open: bool, timeout: int,
     """
     from pywinauto import Desktop
     import pyautogui
-    
+
+    mode_label = "Image recognition" if use_images else "Coordinate-based"
     print(f"Script to run: {script_name}")
     print(f"Quant Analyzer: {qa_path}")
     if output_folder:
         print(f"Output folder: {output_folder}")
-    if use_images:
-        print(f"Mode: Image recognition")
-    else:
-        print(f"Mode: Coordinate-based")
+    print(f"Mode: {mode_label}")
     print()
-    
-    # Configure pyautogui for unattended automation
-    # FAILSAFE disabled because RDP disconnect causes false triggers
-    # This is safe for unattended automation on your own system
-    pyautogui.FAILSAFE = False
-    pyautogui.PAUSE = 0.5  # Pause between actions
-    
-    # Step 1: Launch or connect to QA
-    print("Step 1: Launching Quant Analyzer...")
-    app, launched = launch_or_connect_qa(qa_path)
-    
-    # Find the main window
-    desktop = Desktop(backend="uia")
-    main_window = None
-    for win in desktop.windows():
+
+    with prevent_sleep():
+        # Step 1: Launch or connect to QA
+        print("Step 1: Launching Quant Analyzer...")
+        app, launched = launch_or_connect_qa(qa_path)
+
+        # Find the main window
+        desktop = Desktop(backend="uia")
+        main_window = None
+        for win in desktop.windows():
+            try:
+                title = win.window_text()
+                if title and "Quant Analyzer" in title and "Properties" not in title:
+                    main_window = win
+                    break
+            except Exception:
+                pass
+        if not main_window:
+            raise RuntimeError("Could not find Quant Analyzer window")
+
+        # Configure pyautogui for unattended automation
+        pyautogui.FAILSAFE = False
+        pyautogui.PAUSE = 0.5
+
+        # Bring QA to front (do NOT maximize — QA opens at a fixed position/size)
+        print("  Bringing Quant Analyzer to front...")
         try:
-            title = win.window_text()
-            if title and "Quant Analyzer" in title and "Properties" not in title:
-                main_window = win
-                break
-        except Exception:
-            pass
-    
-    if not main_window:
-        raise RuntimeError("Could not find Quant Analyzer window")
-    
-    # Bring QA to front and maximize using window handle (not screen coordinates)
-    # This avoids accidentally focusing/maximizing other windows (e.g. browser)
-    print("  Bringing Quant Analyzer to front and maximizing...")
-    try:
-        hwnd = main_window.handle
-        # SetForegroundWindow + ShowWindow via Win32 API for reliable focus/maximize
-        ctypes.windll.user32.SetForegroundWindow(hwnd)
-        time.sleep(0.3)
-        ctypes.windll.user32.ShowWindow(hwnd, 3)  # SW_MAXIMIZE
-        time.sleep(1)  # Wait for window to settle
-    except Exception as e:
-        print(f"  {Colors.YELLOW}Warning: Could not maximize window: {e}{Colors.RESET}")
-        print(f"  {Colors.YELLOW}Continuing anyway - image recognition doesn't require maximized window{Colors.RESET}")
-    
-    # Get window position and size AFTER maximizing (or after failed attempt)
-    rect = main_window.rectangle()
-    win_left = rect.left
-    win_top = rect.top
-    win_width = rect.right - rect.left
-    win_height = rect.bottom - rect.top
-    
-    # Get screen size for validation
-    screen_width, screen_height = pyautogui.size()
-    
-    print(f"  Window position: ({win_left}, {win_top})")
-    print(f"  Window size: {win_width} x {win_height}")
-    print(f"  Screen size: {screen_width} x {screen_height}")
-    
-    # Use image recognition or coordinate-based clicking
-    if use_images:
-        _run_script_with_images(script_name, main_window, keep_open, timeout, output_folder, launched)
-    else:
-        _run_script_with_coordinates(script_name, main_window, keep_open, timeout, output_folder, launched,
-                                      win_left, win_top, screen_width, screen_height)
+            hwnd = main_window.handle
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"  {Colors.YELLOW}Warning: Could not bring window to front: {e}{Colors.RESET}")
+
+        rect = main_window.rectangle()
+        win_left = rect.left
+        win_top = rect.top
+        win_width = rect.right - rect.left
+        win_height = rect.bottom - rect.top
+        screen_width, screen_height = pyautogui.size()
+
+        print(f"  Window position: ({win_left}, {win_top})")
+        print(f"  Window size: {win_width} x {win_height}")
+        print(f"  Screen size: {screen_width} x {screen_height}")
+
+        # Use image recognition or coordinate-based clicking
+        if use_images:
+            _run_script_with_images(script_name, main_window, keep_open, timeout, output_folder, launched)
+        else:
+            _run_script_with_coordinates(script_name, main_window, keep_open, timeout, output_folder, launched,
+                                          win_left, win_top, screen_width, screen_height)
 
 
 def _run_script_with_images(script_name: str, main_window, keep_open: bool, timeout: int, output_folder: str, launched: bool):
@@ -1363,7 +1356,8 @@ Examples:
         elif args.capture_templates:
             capture_templates(args.qa_path)
         elif args.script_name:
-            run_qa_script(args.script_name, args.qa_path, args.keep_open, args.timeout, args.output_folder, args.use_images)
+            run_qa_script(args.script_name, args.qa_path, args.keep_open, args.timeout,
+                         args.output_folder, args.use_images)
         else:
             parser.print_help()
             print(f"\n{Colors.RED}Error: Please specify a script name, --inspect, --calibrate, or --capture-templates{Colors.RESET}")
