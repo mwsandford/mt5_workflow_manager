@@ -23,7 +23,7 @@ Run_MT5_WFM.cmd
 
 ## Dependencies
 
-PySide6, pyautogui, pywinauto, opencv-python, pandas, openpyxl, matplotlib. Install via `pip install`.
+PySide6, pyautogui, pywinauto, psutil, opencv-python, pandas, openpyxl, matplotlib. Install via `pip install`.
 
 ## Architecture
 

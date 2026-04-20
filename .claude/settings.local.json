@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''Step6_Run_QA_Script.py''\\).read\\(\\)\\); print\\(''Step6: OK''\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''mt5_workflow_manager.py''\\).read\\(\\)\\); print\\(''GUI: OK''\\)\")",
+      "Bash(python:*)",
+      "Bash(ls -d /c/QuantAnalyzer4/jre*)",
+      "Bash(ls -d /c/QuantAnalyzer4/runtime*)",
+      "Bash(ls -d /c/QuantAnalyzer4/j64*)",
+      "Bash(/c/QuantAnalyzer4/j64/bin/java.exe -version 2>&1)",
+      "Bash(/c/QuantAnalyzer4/j64/jre/bin/jabswitch.exe /?)",
+      "Bash(while read:*)",
+      "Bash(do echo:*)",
+      "Read(//e/Trading/MT5_Workflow_Manager/**)",
+      "Bash(done)",
+      "Bash(powershell -Command \"Get-Process | Where-Object { $_.ProcessName -match 'java|quant' } | Select-Object ProcessName, Id, Path | Format-List\")",
+      "Bash(powershell -NoProfile -Command \"Get-Process | Where-Object {$_.ProcessName -match 'java|quant'} | Select-Object ProcessName, Id, Path | Format-List\")",
+      "Bash(tasklist /v)",
+      "Bash(python3 *)"
+    ]
+  }
+}

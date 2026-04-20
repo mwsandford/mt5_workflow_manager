@@ -168,6 +168,53 @@ def get_templates_folder():
     return os.path.join(script_dir, "qa_templates")
 
 
+def force_foreground(main_window):
+    """Force a window to the foreground, bypassing Windows focus-stealing protection.
+
+    Plain SetForegroundWindow is unreliable because Windows blocks focus changes
+    unless the calling thread is already foreground. This matters for Java Swing
+    apps like Quant Analyzer where another app may be covering the window.
+    """
+    import pyautogui
+    try:
+        hwnd = main_window.handle
+    except Exception:
+        hwnd = None
+
+    user32 = ctypes.windll.user32
+    SW_RESTORE = 9
+
+    if hwnd:
+        # Restore if minimized
+        try:
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, SW_RESTORE)
+        except Exception:
+            pass
+
+        # Dummy ALT press unlocks Windows' foreground restriction for this thread
+        try:
+            pyautogui.keyDown('alt')
+            pyautogui.keyUp('alt')
+        except Exception:
+            pass
+
+        try:
+            user32.SetForegroundWindow(hwnd)
+            user32.BringWindowToTop(hwnd)
+            user32.SetActiveWindow(hwnd)
+        except Exception:
+            pass
+
+    # pywinauto handles AttachThreadInput internally as a last resort
+    try:
+        main_window.set_focus()
+    except Exception:
+        pass
+
+    time.sleep(0.3)
+
+
 def find_and_click(template_name: str, confidence: float = 0.8, timeout: int = 10, double: bool = False):
     """Find a template image on screen and click it.
     
@@ -924,9 +971,7 @@ def run_qa_script(script_name: str, qa_path: str, keep_open: bool, timeout: int,
         # Bring QA to front (do NOT maximize — QA opens at a fixed position/size)
         print("  Bringing Quant Analyzer to front...")
         try:
-            hwnd = main_window.handle
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
-            time.sleep(0.5)
+            force_foreground(main_window)
         except Exception as e:
             print(f"  {Colors.YELLOW}Warning: Could not bring window to front: {e}{Colors.RESET}")
 
@@ -972,9 +1017,8 @@ def _run_script_with_images(script_name: str, main_window, keep_open: bool, time
     
     try:
         # Bring window to front
-        ctypes.windll.user32.SetForegroundWindow(main_window.handle)
-        time.sleep(0.5)
-        
+        force_foreground(main_window)
+
         # Step 2: Click on Scripter in the left menu
         print("\nStep 2: Clicking on Scripter panel...")
         if not find_and_click("scripter_icon.png", confidence=0.8, timeout=10):
@@ -1046,7 +1090,7 @@ def _run_script_with_images(script_name: str, main_window, keep_open: bool, time
         if not keep_open:
             print("\nStep 6: Closing Quant Analyzer...")
             try:
-                ctypes.windll.user32.SetForegroundWindow(main_window.handle)
+                force_foreground(main_window)
                 pyautogui.hotkey('alt', 'F4')
                 time.sleep(1)
                 pyautogui.press('enter')  # Confirm exit dialog
@@ -1086,9 +1130,8 @@ def _run_script_with_coordinates(script_name: str, main_window, keep_open: bool,
     
     try:
         # Bring window to front
-        ctypes.windll.user32.SetForegroundWindow(main_window.handle)
-        time.sleep(0.5)
-        
+        force_foreground(main_window)
+
         # Step 2: Click on Scripter in the left menu
         print("\nStep 2: Clicking on Scripter panel...")
         scripter_x = win_left + SCRIPTER_CLICK_X_OFFSET
@@ -1205,9 +1248,8 @@ def _run_script_with_coordinates(script_name: str, main_window, keep_open: bool,
             print(f"\nStep 6: Closing Quant Analyzer...")
             try:
                 # Bring window to front first
-                ctypes.windll.user32.SetForegroundWindow(main_window.handle)
-                time.sleep(0.3)
-                
+                force_foreground(main_window)
+
                 # Try Alt+F4 to close (works better for Java apps)
                 pyautogui.hotkey('alt', 'F4')
                 time.sleep(1)

@@ -20,7 +20,9 @@ Parameters
 --model             : Tick model for backtesting (0-4). Model: 0 = Every tick, 1 = 1 minute OHLC, 2 = Open price only, 3 = Math calculations, 4 = Every tick based on real ticks
 --from-date         : Backtest start date in YYYY.MM.DD format
 --to-date           : Backtest end date in YYYY.MM.DD format
---timeout           : Maximum seconds to wait for each backtest before force-terminating (default: 900)
+--timeout           : Hard backstop in seconds before force-terminating a backtest (default: 3600)
+--idle-threshold    : CPU% below which MT5 is considered idle (default: 0.1)
+--idle-minutes      : Consecutive minutes of idle CPU before treating as hung (default: 3)
 
 Usage Examples
 --------------
@@ -63,12 +65,14 @@ Tick Model Reference
 
 Known Issues
 ------------
-MT5 occasionally hangs on the "saving report" dialog after a backtest completes.
-This script includes a timeout mechanism that:
-1. Monitors the MT5 process for the specified timeout period
-2. Checks if the report file was saved despite the hang
-3. Force-terminates MT5 if it doesn't exit gracefully
-4. Continues with the next EA in the queue
+MT5 occasionally hangs during or after a backtest (e.g. on the "saving report"
+dialog, or on an EA-raised dialog). This script detects completion and hangs by:
+1. Polling the reports folder every minute — when the expected report appears
+   and its size is stable, MT5 is force-closed and the run treated as successful.
+2. Measuring combined CPU% of terminal64.exe + metatester64.exe every minute.
+   If CPU stays below --idle-threshold for --idle-minutes consecutive minutes
+   without a report appearing, the run is treated as hung and force-terminated.
+3. Using --timeout as an ultimate backstop so a single EA cannot run forever.
 """
 
 import argparse
@@ -80,6 +84,12 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+try:
+    import psutil
+except ImportError:
+    print("ERROR: psutil is required. Install with: pip install psutil", file=sys.stderr)
+    sys.exit(1)
 
 # =============================================================================
 # ANSI colour codes for terminal output
@@ -110,7 +120,9 @@ DEFAULT_REPORT_DEST_FOLDER = r"E:\Trading\Analysis_Ouput"
 DEFAULT_MODEL = 4
 DEFAULT_FROM_DATE = "2025.01.01"
 DEFAULT_TO_DATE = "2025.12.31"
-DEFAULT_TIMEOUT = 900  # 15 minutes - adjust based on typical backtest duration
+DEFAULT_TIMEOUT = 3600  # 1 hour backstop — normally we exit far earlier via report-on-disk or CPU-idle detection
+DEFAULT_IDLE_THRESHOLD = 0.1  # CPU% below this is considered idle (backtesting sits ~0.8%)
+DEFAULT_IDLE_MINUTES = 3  # Consecutive idle minutes with no report → treat as hung
 
 
 # =============================================================================
@@ -201,40 +213,107 @@ def create_ini_file(
     print_gray(f"  Created ini file: {ini_path}")
 
 
+def _collect_mt5_processes(terminal_pid: int) -> list:
+    """Collect psutil.Process objects for the terminal, its descendants, and any
+    stray metatester64.exe processes that may not be parented to our terminal."""
+    procs: list = []
+    seen_pids: set[int] = set()
+
+    try:
+        parent = psutil.Process(terminal_pid)
+        procs.append(parent)
+        seen_pids.add(parent.pid)
+        for child in parent.children(recursive=True):
+            if child.pid not in seen_pids:
+                procs.append(child)
+                seen_pids.add(child.pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+
+    for p in psutil.process_iter(['name', 'pid']):
+        try:
+            name = p.info.get('name') or ''
+            if name.lower() == 'metatester64.exe' and p.pid not in seen_pids:
+                procs.append(p)
+                seen_pids.add(p.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    return procs
+
+
+def sample_mt5_cpu_percent(terminal_pid: int, sample_seconds: float = 1.0) -> float:
+    """Return combined CPU% of MT5 terminal + tester processes over sample_seconds.
+
+    Values are per-core-normalised (can exceed 100% on multi-core workloads), but
+    the tester typically reports well under 1% even when active.
+    """
+    procs = _collect_mt5_processes(terminal_pid)
+    if not procs:
+        return 0.0
+
+    # Prime CPU readings — first call always returns 0.0
+    for p in procs:
+        try:
+            p.cpu_percent(interval=None)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+    time.sleep(sample_seconds)
+
+    total = 0.0
+    for p in procs:
+        try:
+            total += p.cpu_percent(interval=None)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return total
+
+
+def _force_close_mt5(process) -> None:
+    """Terminate then kill the MT5 process if still running."""
+    try:
+        process.terminate()
+        time.sleep(2)
+        if process.poll() is None:
+            process.kill()
+        print_gray("  MT5 process terminated")
+    except Exception as e:
+        print_yellow(f"  WARNING: Error terminating process: {e}")
+
+
 def run_backtest(
     mt5_terminal_path: str,
     ini_path: str,
     report_path: str,
-    timeout_seconds: int = 900,
+    timeout_seconds: int = DEFAULT_TIMEOUT,
     check_interval: int = 5,
+    idle_threshold: float = DEFAULT_IDLE_THRESHOLD,
+    idle_minutes: int = DEFAULT_IDLE_MINUTES,
 ) -> tuple[int, bool]:
     """
     Executes MT5 with the specified ini file and waits for completion.
 
-    Includes a timeout mechanism to handle the known MT5 issue where the
-    "saving report" dialog can hang. If MT5 doesn't exit within the timeout,
-    we check if the report file was created and force-kill the process.
+    Exits early in three ways:
+      1. MT5 exits cleanly — return exit code.
+      2. Report file appears on disk and its size is stable — force-close MT5
+         and return success. This handles the common "save dialog hang".
+      3. Combined CPU% of MT5 processes stays below idle_threshold for
+         idle_minutes consecutive minutes without a report — treat as hung,
+         force-close and return failure.
 
-    Args:
-        mt5_terminal_path: Path to terminal64.exe
-        ini_path: Path to the backtest.ini file
-        report_path: Expected path of the report file (to check if save succeeded)
-        timeout_seconds: Maximum time to wait for MT5 (default: 900 seconds / 15 minutes)
-        check_interval: How often to check if process is done (default: 5 seconds)
+    timeout_seconds is retained as an ultimate backstop.
 
     Returns:
-        Tuple of (exit_code, was_killed):
-            exit_code: 0 if successful, 1 if timeout/killed, -1 if error
-            was_killed: True if process was force-terminated due to timeout
+        (exit_code, was_killed): exit_code 0 = success, 1 = failure; was_killed
+        indicates whether we force-terminated MT5 rather than letting it exit.
     """
     print_gray("  Launching MT5 backtest...")
 
-    # Record the report file's modification time if it exists (to detect new writes)
     report_mtime_before = None
     if os.path.exists(report_path):
         report_mtime_before = os.path.getmtime(report_path)
 
-    # Start MT5 process
     try:
         process = subprocess.Popen(
             [mt5_terminal_path, f'/config:{ini_path}'],
@@ -245,11 +324,11 @@ def run_backtest(
         print_red(f"  ERROR: Failed to start MT5: {e}")
         return -1, False
 
-    # Wait for process with timeout
     elapsed = 0
+    idle_streak = 0  # consecutive minutes MT5 has been CPU-idle
+
     while elapsed < timeout_seconds:
         try:
-            # Check if process has finished
             return_code = process.poll()
             if return_code is not None:
                 print_gray(f"  Backtest completed (Exit code: {return_code})")
@@ -260,12 +339,44 @@ def run_backtest(
         time.sleep(check_interval)
         elapsed += check_interval
 
-        # Every 60 seconds, print a status update
-        if elapsed % 60 == 0:
-            print_gray(f"  Still running... ({format_duration(elapsed)} elapsed)")
+        if elapsed % 60 != 0:
+            continue
 
-    # Timeout reached - check if report was saved
-    print_yellow(f"  WARNING: MT5 did not exit within {format_duration(timeout_seconds)}")
+        print_gray(f"  Still running... ({format_duration(elapsed)} elapsed)")
+
+        # --- Check 1: report file appeared on disk ---
+        if os.path.exists(report_path):
+            current_mtime = os.path.getmtime(report_path)
+            if report_mtime_before is None or current_mtime > report_mtime_before:
+                print_yellow("  Report file detected on disk — verifying write is complete...")
+                time.sleep(5)
+                size_first = os.path.getsize(report_path)
+                time.sleep(3)
+                size_second = os.path.getsize(report_path)
+                if size_second == size_first and size_second > 0:
+                    print_yellow("  Report file confirmed stable — force-closing MT5")
+                    _force_close_mt5(process)
+                    return 0, True
+                print_gray("  Report file still being written, continuing to wait...")
+
+        # --- Check 2: CPU-idle watchdog ---
+        cpu = sample_mt5_cpu_percent(process.pid)
+        if cpu < idle_threshold:
+            idle_streak += 1
+            print_yellow(f"  MT5 CPU idle ({cpu:.2f}%) — idle streak {idle_streak}/{idle_minutes}")
+            if idle_streak >= idle_minutes:
+                print_red(
+                    f"  ERROR: MT5 appears hung ({idle_minutes} min idle, no report) — force-closing"
+                )
+                _force_close_mt5(process)
+                return 1, True
+        else:
+            if idle_streak > 0:
+                print_gray(f"  MT5 CPU active ({cpu:.2f}%) — idle streak reset")
+            idle_streak = 0
+
+    # Backstop timeout reached
+    print_yellow(f"  WARNING: MT5 did not exit within backstop timeout {format_duration(timeout_seconds)}")
 
     report_saved = False
     if os.path.exists(report_path):
@@ -274,22 +385,13 @@ def run_backtest(
             report_saved = True
             print_yellow("  Report file was saved successfully despite hang")
 
-    # Force kill the MT5 process
     print_yellow("  Force-terminating MT5 process...")
-    try:
-        process.terminate()
-        time.sleep(2)
-        if process.poll() is None:
-            process.kill()  # Force kill if terminate didn't work
-        print_gray("  MT5 process terminated")
-    except Exception as e:
-        print_yellow(f"  WARNING: Error terminating process: {e}")
+    _force_close_mt5(process)
 
     if report_saved:
-        return 0, True  # Consider it successful since report was saved
-    else:
-        print_red("  ERROR: Report was not saved before timeout")
-        return 1, True
+        return 0, True
+    print_red("  ERROR: Report was not saved before backstop timeout")
+    return 1, True
 
 
 def format_duration(seconds: float) -> str:
@@ -455,7 +557,19 @@ Examples:
         "--timeout",
         type=int,
         default=DEFAULT_TIMEOUT,
-        help=f"Maximum seconds to wait for each backtest before force-terminating (default: {DEFAULT_TIMEOUT})",
+        help=f"Hard backstop in seconds before force-terminating a backtest (default: {DEFAULT_TIMEOUT})",
+    )
+    parser.add_argument(
+        "--idle-threshold",
+        type=float,
+        default=DEFAULT_IDLE_THRESHOLD,
+        help=f"CPU%% below which MT5 is considered idle (default: {DEFAULT_IDLE_THRESHOLD})",
+    )
+    parser.add_argument(
+        "--idle-minutes",
+        type=int,
+        default=DEFAULT_IDLE_MINUTES,
+        help=f"Consecutive idle minutes before treating MT5 as hung (default: {DEFAULT_IDLE_MINUTES})",
     )
     parser.add_argument(
         "--strategies-json",
@@ -563,7 +677,8 @@ def main() -> None:
     print_green(f"Found {len(ea_files)} EA(s) to backtest")
     print_gray(f"Model: {args.model} ({model_desc})")
     print_gray(f"Date Range: {args.from_date} to {args.to_date}")
-    print_gray(f"Timeout: {format_duration_friendly(args.timeout)} per backtest")
+    print_gray(f"Timeout: {format_duration_friendly(args.timeout)} per backtest (backstop)")
+    print_gray(f"Idle watchdog: kill after {args.idle_minutes} min below {args.idle_threshold}% CPU")
     print()
 
     # Path for the ini file - stored in MT5 data folder for reliability
@@ -614,6 +729,8 @@ def main() -> None:
             ini_path=ini_path,
             report_path=expected_report_path,
             timeout_seconds=args.timeout,
+            idle_threshold=args.idle_threshold,
+            idle_minutes=args.idle_minutes,
         )
         bt_duration = time.time() - bt_start
 
