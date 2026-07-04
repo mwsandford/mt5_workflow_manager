@@ -34,7 +34,7 @@ PySide6, pyautogui, pywinauto, psutil, opencv-python, pandas, openpyxl, matplotl
 - `WorkflowStep` (dataclass) — step definition with name, script path, `build_args` callback, and `depends_on` chain
 - `Settings` (dataclass) — all user configuration, persisted as JSON
 - `StepCard` — individual step UI widget with status indicator and run button
-- `WorkflowSection` — grouped section of related steps (Data Update, Backtest, Monte Carlo)
+- `WorkflowSection` — grouped section of related steps (Data Update, Backtest, Monte Carlo M1, Monte Carlo Tick, Tick Survival Analysis)
 - `Theme` — dark theme color constants (GitHub dark mode inspired)
 - `StepStatus` (enum) — IDLE, RUNNING, COMPLETE, FAILED
 
@@ -53,9 +53,26 @@ PySide6, pyautogui, pywinauto, psutil, opencv-python, pandas, openpyxl, matplotl
 | 5 | Step5_MT5_Backtest.py | Backtest | Run backtests via MT5 terminal CLI with INI files |
 | 6 | Step6_Run_QA_Script.py | Monte Carlo | Automate Quant Analyzer scripting (pywinauto + image recognition) |
 | 7 | Step7_Strategy_Ranking.py | Monte Carlo | Correlation analysis, Excel + HTML dashboard generation |
-| 9 | Step9_Update_Dashboard_Tick.py | Monte Carlo (Tick) | Merge tick MC results into dashboard |
+| 8 | Step8_Update_Dashboard_Tick.py | Monte Carlo (Tick) | Merge tick MC results into run-level Dashboard |
+| 10 | Step10_Update_Tick_Survival.py | Tick Survival Analysis | Update persistent SQLite store + regenerate cross-run survival dashboard |
 
-Note: Step 8 does not exist. Steps 5/6 have "tick" variants (5b/6b) configured in the GUI.
+Note: Step 9 does not exist (number reserved). Steps 5/6 have "tick" variants (5b/6b) configured in the GUI.
+
+## Tick Survival Analysis (Step 10)
+
+A persistent, cross-run analytics store that accumulates strategy characteristics joined to backtest results and renders an HTML survival-analysis dashboard.
+
+**Why separate from the run-level Dashboard**: `BacktestOutputFolder` is wiped every run, so anything needing to build up history across runs must live outside it. The tick_survival store lives inside the Workflow Manager folder.
+
+**Layout**:
+- `tick_survival/db.py` — stdlib `sqlite3` schema + upsert helpers. Two tables: `Strategies` (natural key `StrategyName`), `BacktestResults` (`UNIQUE(StrategyID, BatchID)`)
+- `tick_survival/parser.py` — reads `Dashboard/strategies_data.json` + embedded `const DATA` from `Dashboard/index.html`; falls back to re-running Step 7's `parse_strategy_pseudo_code` for missing entries
+- `tick_survival/dashboard.py` — self-contained dark-theme HTML with filter bar, 12 survival-by-characteristic tables, Bayesian-shrunk predictive ranking, expandable per-strategy history
+- `tick_survival/tick_survival.db` — persistent store (never checked into the run output folder)
+- `tick_survival/reports/tick_survival_dashboard.html` — generated view, rebuilt from the DB every run
+- `Step10_Update_Tick_Survival.py` — CLI orchestrator: parse → upsert → regenerate HTML → `webbrowser.open()`
+
+**Scope**: only top-10 tick-tested strategies per batch are stored (records where `ranking.mc95_ret_dd_tick is not None`). Re-running Step 10 against the same folder upserts; new runs accumulate as history rows. Pass threshold defaults to MC95 Tick ≥ 2.0 (configurable via `Settings.TickSurvivalThreshold` in the GUI and `--tick-threshold` CLI arg).
 
 ## Configuration
 
