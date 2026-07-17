@@ -27,14 +27,14 @@ PySide6, pyautogui, pywinauto, psutil, opencv-python, pandas, openpyxl, matplotl
 
 ## Architecture
 
-**Execution model**: The main GUI (`mt5_workflow_manager.py`, ~1900 lines) launches each workflow step as a **subprocess** running individual `Step*.py` scripts. Output is captured in real-time via threads and rendered as color-coded HTML in the log panel.
+**Execution model**: The main GUI (`mt5_workflow_manager.py`, ~1970 lines) launches each workflow step as a **subprocess** running individual `Step*.py` scripts. Output is captured in real-time via threads and rendered as color-coded HTML in the log panel.
 
 **Key classes in `mt5_workflow_manager.py`**:
 - `WorkflowWindow(QMainWindow)` — main application window, process management, and step orchestration
-- `WorkflowStep` (dataclass) — step definition with name, script path, `build_args` callback, and `depends_on` chain
+- `WorkflowStep` (dataclass) — step definition with `id`, `title`, `description`, `script_name`, `build_args` callback, `depends_on` chain, and optional confirm-dialog mode (`is_confirmation` + `confirmation_message`) for user-gated pseudo-steps that don't launch a subprocess
 - `Settings` (dataclass) — all user configuration, persisted as JSON
-- `StepCard` — individual step UI widget with status indicator and run button
-- `WorkflowSection` — grouped section of related steps (Data Update, Backtest, Monte Carlo M1, Monte Carlo Tick, Tick Survival Analysis)
+- `StepCard` — individual step UI widget with status indicator and run/confirm button
+- `WorkflowSection` — grouped section of related steps. Five sections are instantiated with these display titles: "Update MetaTrader Data", "Back Test MetaTrader Expert Advisors", "Monte Carlo Analysis - M1", "Monte Carlo Analysis - Tick", and "Tick Survival Analysis"
 - `Theme` — dark theme color constants (GitHub dark mode inspired)
 - `StepStatus` (enum) — IDLE, RUNNING, COMPLETE, FAILED
 
