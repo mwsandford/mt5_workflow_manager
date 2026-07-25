@@ -2852,6 +2852,9 @@ def generate_dashboard(folder_path, strategies, stats, names,
         'names': names,
         'summary': summary_data,
         'ranking': ranking_data,
+        # Populated later by Step 8 from the tick backtest .htm reports + tick MC.
+        # Empty here so the M1/Tick toggle renders (with an empty-state) pre-tick-run.
+        'tick_ranking': [],
         'portfolio': portfolio_data,
         'mc_failed': mc_failed or [],
         'overviews': overview_js,
@@ -2889,6 +2892,7 @@ def generate_dashboard(folder_path, strategies, stats, names,
     strategies_json_path = os.path.join(dashboard_dir, 'strategies_data.json')
     strategies_export = {
         'ranking': js_data.get('ranking', []),
+        'tick_ranking': js_data.get('tick_ranking', []),
         'portfolio': js_data.get('portfolio', []),
         'strategies': js_data.get('strategies', []),
         'mc_failed': js_data.get('mc_failed', []),
@@ -3398,6 +3402,25 @@ tr.abandon-row:hover td { opacity: 0.75; }
   font-weight: 400;
 }
 
+/* M1 / Tick segmented toggle (next to the Rankings heading) */
+.section-header-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; margin-bottom: 14px;
+}
+.section-header-row .section-header { margin-bottom: 0; }
+.grid-toggle {
+  display: inline-flex; background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 2px; gap: 2px;
+}
+.grid-toggle-btn {
+  background: none; border: none; color: var(--text-secondary);
+  font-family: var(--font-body); font-size: 0.8rem; font-weight: 600;
+  padding: 5px 16px; border-radius: calc(var(--radius) - 2px); cursor: pointer;
+  transition: all 0.15s;
+}
+.grid-toggle-btn:hover { color: var(--text-primary); }
+.grid-toggle-btn.active { color: var(--accent); background: var(--accent-dim); }
+
 /* Cluster cards */
 .cluster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
 .cluster-card {
@@ -3646,8 +3669,11 @@ JS_BLOCK = r"""
   }
 
   // === Export Strategy Data ===
-  function exportStrategy(name) {
-    const ranking = DATA.ranking.find(r => r.name === name);
+  // useTick=true exports the tick backtest metrics + tick equity curve (the M1
+  // grid has no Export button). Strategy profile / pseudo-code are model-
+  // independent, so they are reused as-is from the shared M1-derived data.
+  function exportStrategy(name, useTick) {
+    const ranking = (useTick ? DATA.tick_ranking : DATA.ranking).find(r => r.name === name);
     const summary = DATA.summary.find(s => s.name === name);
     const portfolio = DATA.portfolio.find(p => p.name === name);
     const overview = DATA.overviews[name] || null;
@@ -3658,6 +3684,7 @@ JS_BLOCK = r"""
       _export_version: '1.0',
       _exported_at: new Date().toISOString(),
       _source: 'strategy_correlation_analysis',
+      _model: useTick ? 'tick' : 'm1',
       strategy_name: name,
 
       // ── Maps to: backtest_data TEXT column ──
@@ -3819,69 +3846,117 @@ JS_BLOCK = r"""
     render();
   }
 
-  // === Rankings Panel ===
-  (function buildRankings() {
+  // === Rankings Panel (M1 / Tick toggle) ===
+  (function buildRankingsSection() {
     const el = $('#panel-ranking');
-    if (!DATA.ranking.length) {
+    if (!DATA.ranking || !DATA.ranking.length) {
       el.innerHTML = '<div class="section-header">MT5 Backtest Rankings</div><p style="color:var(--text-muted)">No MT5 reports found — ranking not available. Place MT5 .htm reports alongside your trade CSVs.</p>';
       return;
     }
-    el.innerHTML = '<div class="section-header">MT5 Backtest Rankings</div><div class="section-sub">' +
-      DATA.ranking.length + ' strategies ranked by multi-metric composite score</div><div id="rankingTable"></div>';
 
-    // Build lookup for portfolio decisions
+    // Header row: title + M1/Tick segmented toggle
+    el.innerHTML =
+      '<div class="section-header-row">' +
+        '<div class="section-header" id="rankingHeading">MT5 Backtest Rankings — M1</div>' +
+        '<div class="grid-toggle" id="rankingToggle">' +
+          '<button class="grid-toggle-btn active" data-grid="m1">M1</button>' +
+          '<button class="grid-toggle-btn" data-grid="tick">Tick</button>' +
+        '</div>' +
+      '</div>' +
+      '<div id="gridM1"></div>' +
+      '<div id="gridTick" class="hidden"></div>';
+
+    // Portfolio decisions drive ABANDON badges — an M1-level concept only
     const portfolioDecisions = {};
     const portfolioReasons = {};
     if (DATA.portfolio) {
       DATA.portfolio.forEach(p => { portfolioDecisions[p.name] = p.decision; portfolioReasons[p.name] = p.reason || ''; });
     }
 
+    // Both grids share the same column layout. On the M1 grid, MC95 Ret/DD is the
+    // M1 Monte Carlo value; on the Tick grid it is the tick Monte Carlo value.
     const headers = [
       {label:'#'}, {label:'Strategy', text:true, rawHtml:true}, {label:'Score'}, {label:'Net Profit'},
-      {label:'Ret/DD'}, {label:'MC95 Ret/DD'}, {label:'MC95 Tick'}, {label:'MC Rank'}, {label:'W/L'}, {label:'PF'}, {label:'Sharpe'},
+      {label:'Ret/DD'}, {label:'MC95 Ret/DD'}, {label:'MC Rank'}, {label:'W/L'}, {label:'PF'}, {label:'Sharpe'},
       {label:'Recovery'}, {label:'LR Corr'}, {label:'Win%'}, {label:'Trades'},
       {label:'DD ($)'}, {label:'DD %'}, {label:'Analyze', noSort:true, rawHtml:true}
     ];
-    const rows = DATA.ranking.map(r => {
-      const hasOv = !!DATA.overviews[r.name];
-      const hasCode = !!DATA.strategy_codes[r.name];
-      const ovBtn = hasOv
-        ? `<button class="analyze-btn ov-btn" data-name="${r.name}" data-action="overview">Overview</button>`
-        : `<button class="analyze-btn ov-btn disabled">Overview</button>`;
-      const codeBtn = hasCode
-        ? `<button class="analyze-btn code-btn" data-name="${r.name}" data-action="code">Strategy</button>`
-        : `<button class="analyze-btn code-btn disabled">Strategy</button>`;
-      const chartBtn = r.chart
-        ? `<button class="analyze-btn chart-btn" data-name="${r.name}" data-chart="${r.chart}" data-action="chart">Chart</button>`
-        : `<button class="analyze-btn chart-btn disabled">Chart</button>`;
-      const exportBtn = `<button class="analyze-btn export-btn" data-name="${r.name}" data-action="export">Export</button>`;
 
-      // Show strategy name with ABANDON badge if applicable
-      const decision = portfolioDecisions[r.name];
-      const abandonReason = portfolioReasons[r.name] || '';
-      const nameDisplay = decision === 'ABANDON'
-        ? `<span class="abandon-name">${r.name}</span> <span class="tag tag-abandon" title="${abandonReason.replace(/"/g, '&quot;')}" style="font-size:10px;padding:1px 6px;vertical-align:middle;cursor:help;">✗ ABANDON</span>`
-        : r.name;
+    function buildGrid(containerSel, dataset, opts) {
+      const isTick = !!(opts && opts.isTick);
+      const container = $(containerSel);
+      if (!dataset || !dataset.length) {
+        container.innerHTML = '<div class="section-sub">' +
+          (isTick
+            ? 'No tick backtest results yet — run the "Monte Carlo Analysis - Tick" steps, then this grid will populate.'
+            : '0 strategies') + '</div>';
+        return;
+      }
+      const subText = isTick
+        ? dataset.length + ' strategies back-tested on real ticks (top KEEP strategies from the M1 analysis)'
+        : dataset.length + ' strategies ranked by multi-metric composite score';
+      const tableId = isTick ? 'tickRankingTable' : 'm1RankingTable';
+      container.innerHTML = '<div class="section-sub">' + subText + '</div><div id="' + tableId + '"></div>';
 
-      const row = [
-        r.rank, nameDisplay, r.score, '$' + r.net_profit.toLocaleString(undefined, {minimumFractionDigits:2}),
-        r.ret_dd, r.mc95_ret_dd || '—', r.mc95_ret_dd_tick || '—', r.mc_rank != null ? r.mc_rank : '—', r.wl_ratio, r.pf, r.sharpe,
-        r.recovery, r.lr_corr, r.win_rate + '%', r.trades,
-        '$' + r.dd_dollar.toLocaleString(undefined, {minimumFractionDigits:2}), r.dd_pct + '%',
-        `<div class="btn-group">${ovBtn}${codeBtn}${chartBtn}${exportBtn}</div>`
-      ];
-      row._tier = r.rank <= 5 ? 'tier-1' : r.rank <= 10 ? 'tier-2' : r.rank <= 25 ? 'tier-3' : '';
-      if (decision === 'ABANDON') row._abandon = true;
-      return row;
+      const rows = dataset.map(r => {
+        const hasOv = !!DATA.overviews[r.name];
+        const hasCode = !!DATA.strategy_codes[r.name];
+        const ovBtn = hasOv
+          ? `<button class="analyze-btn ov-btn" data-name="${r.name}" data-action="overview">Overview</button>`
+          : `<button class="analyze-btn ov-btn disabled">Overview</button>`;
+        const codeBtn = hasCode
+          ? `<button class="analyze-btn code-btn" data-name="${r.name}" data-action="code">Strategy</button>`
+          : `<button class="analyze-btn code-btn disabled">Strategy</button>`;
+        const chartBtn = r.chart
+          ? `<button class="analyze-btn chart-btn" data-name="${r.name}" data-chart="${r.chart}" data-action="chart">Chart</button>`
+          : `<button class="analyze-btn chart-btn disabled">Chart</button>`;
+        // Export lives only on the Tick grid — tick results feed Portfolio_Tracker
+        const exportBtn = isTick
+          ? `<button class="analyze-btn export-btn" data-name="${r.name}" data-action="export">Export</button>`
+          : '';
+
+        let nameDisplay = r.name;
+        if (!isTick && portfolioDecisions[r.name] === 'ABANDON') {
+          const abandonReason = portfolioReasons[r.name] || '';
+          nameDisplay = `<span class="abandon-name">${r.name}</span> <span class="tag tag-abandon" title="${abandonReason.replace(/"/g, '&quot;')}" style="font-size:10px;padding:1px 6px;vertical-align:middle;cursor:help;">✗ ABANDON</span>`;
+        }
+
+        const row = [
+          r.rank, nameDisplay, r.score, '$' + (r.net_profit || 0).toLocaleString(undefined, {minimumFractionDigits:2}),
+          r.ret_dd, r.mc95_ret_dd || '—', r.mc_rank != null ? r.mc_rank : '—', r.wl_ratio, r.pf, r.sharpe,
+          r.recovery, r.lr_corr, r.win_rate + '%', r.trades,
+          '$' + (r.dd_dollar || 0).toLocaleString(undefined, {minimumFractionDigits:2}), r.dd_pct + '%',
+          `<div class="btn-group">${ovBtn}${codeBtn}${chartBtn}${exportBtn}</div>`
+        ];
+        row._tier = r.rank <= 5 ? 'tier-1' : r.rank <= 10 ? 'tier-2' : r.rank <= 25 ? 'tier-3' : '';
+        if (!isTick && portfolioDecisions[r.name] === 'ABANDON') row._abandon = true;
+        return row;
+      });
+      renderSortableTable('#' + tableId, headers, rows, {defaultSort: 0, defaultDir: 'asc'});
+    }
+
+    buildGrid('#gridM1', DATA.ranking, {isTick:false});
+    buildGrid('#gridTick', DATA.tick_ranking, {isTick:true});
+
+    // Segmented toggle: swap which grid is visible + update the heading suffix
+    el.querySelectorAll('#rankingToggle .grid-toggle-btn').forEach(b => {
+      b.addEventListener('click', () => {
+        const g = b.dataset.grid;
+        el.querySelectorAll('#rankingToggle .grid-toggle-btn').forEach(x => x.classList.toggle('active', x === b));
+        $('#gridM1').classList.toggle('hidden', g !== 'm1');
+        $('#gridTick').classList.toggle('hidden', g !== 'tick');
+        $('#rankingHeading').textContent = 'MT5 Backtest Rankings — ' + (g === 'm1' ? 'M1' : 'Tick');
+      });
     });
-    renderSortableTable('#rankingTable', headers, rows, {defaultSort: 0, defaultDir: 'asc'});
 
-    // Button delegation
+    // Button delegation — the dataset is chosen by which grid the button sits in
     el.addEventListener('click', e => {
       const btn = e.target.closest('.analyze-btn:not(.disabled)');
       if (!btn) return;
       const name = btn.dataset.name;
       const action = btn.dataset.action;
+      const inTick = !!btn.closest('#gridTick');
+      const dataset = inTick ? DATA.tick_ranking : DATA.ranking;
 
       if (action === 'overview') {
         if (activeSideStrategy === name + '_ov') { closeSidePanel(); return; }
@@ -3892,18 +3967,20 @@ JS_BLOCK = r"""
         openCodePanel(name);
       } else if (action === 'chart') {
         if (activeSideStrategy === name) { closeSidePanel(); return; }
-        const r = DATA.ranking.find(x => x.name === name);
+        const r = (dataset || []).find(x => x.name === name);
+        if (!r) return;
+        const mcLabel = inTick ? 'MC95 Ret/DD (Tick)' : 'MC95 Ret/DD';
         const stats = [
-          ['Composite Score', r.score], ['Net Profit', '$' + r.net_profit.toLocaleString()],
-          ['Ret/DD Ratio', r.ret_dd], ['MC95 Ret/DD', r.mc95_ret_dd || '—'],
-          ['MC95 Ret/DD Tick', r.mc95_ret_dd_tick || '—'], ['Profit Factor', r.pf],
-          ['Sharpe Ratio', r.sharpe], ['Recovery Factor', r.recovery],
-          ['LR Correlation', r.lr_corr], ['Win Rate', r.win_rate + '%'],
-          ['Total Trades', r.trades], ['Max DD', '$' + r.dd_dollar.toLocaleString() + ' (' + r.dd_pct + '%)'],
+          ['Composite Score', r.score], ['Net Profit', '$' + (r.net_profit || 0).toLocaleString()],
+          ['Ret/DD Ratio', r.ret_dd], [mcLabel, r.mc95_ret_dd || '—'],
+          ['Profit Factor', r.pf], ['Sharpe Ratio', r.sharpe],
+          ['Recovery Factor', r.recovery], ['LR Correlation', r.lr_corr],
+          ['Win Rate', r.win_rate + '%'], ['Total Trades', r.trades],
+          ['Max DD', '$' + (r.dd_dollar || 0).toLocaleString() + ' (' + r.dd_pct + '%)'],
         ];
         openSidePanel(name, btn.dataset.chart, stats);
       } else if (action === 'export') {
-        exportStrategy(name);
+        exportStrategy(name, inTick);
       }
     });
   })();

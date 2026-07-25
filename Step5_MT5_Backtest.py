@@ -118,6 +118,9 @@ DEFAULT_MT5_TERMINAL_PATH = r"C:\Program Files\Pepperstone_MT5_01\terminal64.exe
 DEFAULT_MT5_DATA_FOLDER = r"C:\Users\msand\AppData\Roaming\MetaQuotes\Terminal\98196E2B1CEDEE516442D255B458C6C2"
 DEFAULT_REPORT_DEST_FOLDER = r"E:\Trading\Analysis_Ouput"
 DEFAULT_MODEL = 4
+# Strategy Tester "Delays" setting: 0 = zero latency, -1 = random delay,
+# >0 = fixed delay in ms (max 600000). Random delay emulates slippage/requotes.
+EXECUTION_MODE = -1
 DEFAULT_FROM_DATE = "2025.01.01"
 DEFAULT_TO_DATE = "2025.12.31"
 DEFAULT_TIMEOUT = 3600  # 1 hour backstop — normally we exit far earlier via report-on-disk or CPU-idle detection
@@ -199,6 +202,7 @@ def create_ini_file(
         f"Symbol={symbol}.QDM",
         f"Period={timeframe}",
         f"Model={model}",
+        f"ExecutionMode={EXECUTION_MODE}",
         f"FromDate={from_date}",
         f"ToDate={to_date}",
         f"Report=reports\\{ea_base_name} MT5",

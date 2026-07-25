@@ -16,7 +16,9 @@
       "Bash(powershell -Command \"Get-Process | Where-Object { $_.ProcessName -match 'java|quant' } | Select-Object ProcessName, Id, Path | Format-List\")",
       "Bash(powershell -NoProfile -Command \"Get-Process | Where-Object {$_.ProcessName -match 'java|quant'} | Select-Object ProcessName, Id, Path | Format-List\")",
       "Bash(tasklist /v)",
-      "Bash(python3 *)"
+      "Bash(python3 *)",
+      "Read(//e/Trading/**)",
+      "WebFetch(domain:www.metatrader5.com)"
     ]
   }
 }

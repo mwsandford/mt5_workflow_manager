@@ -799,9 +799,16 @@ class WorkflowSection(QWidget):
             else:
                 card.set_dependency_met(True)
 
-    def on_step_completed(self, step_id: str):
-        """Called when a step completes - update dependencies."""
-        self._update_dependencies()
+    def on_step_completed(self, step_id: str, enforce: bool = True):
+        """Called when a step completes - update dependencies.
+
+        Args:
+            enforce: When False (non-sequential mode), dependencies are not
+                re-enforced so every step stays individually runnable in any
+                order. When True (sequential mode), the dependency chain gates
+                which step becomes available next.
+        """
+        self._update_dependencies(enforce=enforce)
 
     def get_card(self, step_id: str) -> Optional[StepCard]:
         return self.cards.get(step_id)
@@ -1903,9 +1910,12 @@ class WorkflowWindow(QMainWindow):
             self.status_label.setText("Ready")
             if card:
                 card.set_status(StepStatus.COMPLETE)
-            # Update dependencies
+            # Update dependencies. Only re-enforce the dependency chain in
+            # sequential mode; when Sequential Execution is off, keep every
+            # step manually runnable in any order.
             if section:
-                section.on_step_completed(completed_step_id)
+                section.on_step_completed(
+                    completed_step_id, enforce=self._is_sequential_mode())
         else:
             self.log_panel.append_line("")
             self.log_panel.append_error("Step failed")

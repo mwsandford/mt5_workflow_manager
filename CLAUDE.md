@@ -58,6 +58,17 @@ PySide6, pyautogui, pywinauto, psutil, opencv-python, pandas, openpyxl, matplotl
 
 Note: Step 9 does not exist (number reserved). Steps 5/6 have "tick" variants (5b/6b) configured in the GUI.
 
+## Dashboard Column Provenance (MT5 Backtest Rankings table)
+
+The run-level Dashboard runs **two separate MT5 backtests** against the same EAs using different tick models (`Step5_MT5_Backtest.py --model`):
+- **M1 backtest** — `--model 1` (**1 minute OHLC**), output to `BacktestOutputFolder`. This is the primary/faster pass over all strategies.
+- **Tick backtest** — `--model 4` (**Every tick based on real ticks**), output to `BacktestOutputFolder/ticks`, run only for the top-10 KEEP strategies from the M1 analysis (`--max-strategies 10`).
+
+Every column in the "MT5 Backtest Rankings" table is sourced from the **1-minute-OHLC pipeline**, *except* `MC95 Tick`:
+- **SCORE, NET PROFIT, RET/DD, W/L, PF, SHARPE, RECOVERY, LR CORR, WIN%, TRADES, DD($), DD%** — parsed directly from the M1 MT5 Strategy Tester `.htm` reports (`parse_mt5_report`) plus trade CSVs, in `Step7_Strategy_Ranking.py`.
+- **MC95 RET/DD** and **MC RANK** — derived from the Monte Carlo pass (`BatchMC_Results.csv` / `MC_Ranked.csv`) run *on the M1 backtest* (Step 6).
+- **MC95 TICK** — the only column from the tick model. Step 7 emits it as a `None` placeholder (`ranking[].mc95_ret_dd_tick`); `Step8_Update_Dashboard_Tick.py` fills it from `ticks/BatchMC_Results.csv` (Monte Carlo on the tick backtest).
+
 ## Tick Survival Analysis (Step 10)
 
 A persistent, cross-run analytics store that accumulates strategy characteristics joined to backtest results and renders an HTML survival-analysis dashboard.
