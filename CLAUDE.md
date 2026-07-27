@@ -52,8 +52,8 @@ PySide6, pyautogui, pywinauto, psutil, opencv-python, pandas, openpyxl, matplotl
 | 4 | Step4_Compile_MT5_EAs.py | Backtest | Batch compile `.mq5` → `.ex5` via `metaeditor64.exe` |
 | 5 | Step5_MT5_Backtest.py | Backtest | Run backtests via MT5 terminal CLI with INI files |
 | 6 | Step6_Run_QA_Script.py | Monte Carlo | Automate Quant Analyzer scripting (pywinauto + image recognition) |
-| 7 | Step7_Strategy_Ranking.py | Monte Carlo | Correlation analysis, Excel + HTML dashboard generation |
-| 8 | Step8_Update_Dashboard_Tick.py | Monte Carlo (Tick) | Merge tick MC results into run-level Dashboard |
+| 7 | Step7_Strategy_Ranking.py | Monte Carlo | Composite-score ranking, Excel + HTML dashboard generation |
+| 8 | Step8_Update_Dashboard_Tick.py | Monte Carlo (Tick) | Merge tick MC results into run-level Dashboard + run the tick correlation check |
 | 10 | Step10_Update_Tick_Survival.py | Tick Survival Analysis | Update persistent SQLite store + regenerate cross-run survival dashboard |
 
 Note: Step 9 does not exist (number reserved). Steps 5/6 have "tick" variants (5b/6b) configured in the GUI.
@@ -62,12 +62,25 @@ Note: Step 9 does not exist (number reserved). Steps 5/6 have "tick" variants (5
 
 The run-level Dashboard runs **two separate MT5 backtests** against the same EAs using different tick models (`Step5_MT5_Backtest.py --model`):
 - **M1 backtest** — `--model 1` (**1 minute OHLC**), output to `BacktestOutputFolder`. This is the primary/faster pass over all strategies.
-- **Tick backtest** — `--model 4` (**Every tick based on real ticks**), output to `BacktestOutputFolder/ticks`, run only for the top-10 KEEP strategies from the M1 analysis (`--max-strategies 10`).
+- **Tick backtest** — `--model 4` (**Every tick based on real ticks**), output to `BacktestOutputFolder/ticks`, run only for the top-N strategies by M1 composite rank (`--max-strategies`, driven by `Settings.TickBacktestCount`, default **20**).
 
 Every column in the "MT5 Backtest Rankings" table is sourced from the **1-minute-OHLC pipeline**, *except* `MC95 Tick`:
 - **SCORE, NET PROFIT, RET/DD, W/L, PF, SHARPE, RECOVERY, LR CORR, WIN%, TRADES, DD($), DD%** — parsed directly from the M1 MT5 Strategy Tester `.htm` reports (`parse_mt5_report`) plus trade CSVs, in `Step7_Strategy_Ranking.py`.
 - **MC95 RET/DD** and **MC RANK** — derived from the Monte Carlo pass (`BatchMC_Results.csv` / `MC_Ranked.csv`) run *on the M1 backtest* (Step 6).
 - **MC95 TICK** — the only column from the tick model. Step 7 emits it as a `None` placeholder (`ranking[].mc95_ret_dd_tick`); `Step8_Update_Dashboard_Tick.py` fills it from `ticks/BatchMC_Results.csv` (Monte Carlo on the tick backtest).
+
+## Strategy Correlation Check (Step 8, tick data only)
+
+The correlation / cluster / KEEP-ABANDON check runs on the **tick** backtest results, not M1. Step 7 no longer computes correlation at all — it emits the correlation-driven dashboard sections empty (`portfolio`, `corr_names`, `correlations`, `clusters`, `best_pairs`, `cards.tick_*`) and `Step8_Update_Dashboard_Tick.py` fills them in.
+
+**How it works** (`compute_tick_correlation` in Step 8):
+1. `parse_tick_trades` reconstructs a per-trade P&L series from each tick `.htm` report's Deals table — successive **Balance** deltas on `out` deals, so commission and swap are included. The entry side comes from the preceding `in` deal (used for the Long Only / Short Only / Both label).
+2. Step 7's primitives do the maths — `build_pnl_series` → `compute_pairwise_correlation` (daily/weekly/monthly) → `identify_clusters` at weekly |r| ≥ `CORR_CLUSTER_THRESHOLD` (0.5).
+3. Highest **tick** composite score in each cluster is KEEP; the rest are ABANDON.
+
+**Where it surfaces**: ✗ ABANDON badges + dimmed rows on the **Tick** grid only (the M1 grid never shows them), plus the Portfolio, Correlation and Clusters tabs and the Tick Clusters / Tick Keep / Tick Abandon summary cards. Before Step 8 runs, those tabs show an empty state.
+
+**Step 7's correlation functions are still live** — `build_pnl_series`, `compute_pairwise_correlation` and `identify_clusters` remain in `Step7_Strategy_Ranking.py` because Step 8 imports them. Trade-overlap analysis was removed entirely (it needed trade open times, which the Deals table doesn't expose directly).
 
 ## Tick Survival Analysis (Step 10)
 
@@ -83,7 +96,7 @@ A persistent, cross-run analytics store that accumulates strategy characteristic
 - `tick_survival/reports/tick_survival_dashboard.html` — generated view, rebuilt from the DB every run
 - `Step10_Update_Tick_Survival.py` — CLI orchestrator: parse → upsert → regenerate HTML → `webbrowser.open()`
 
-**Scope**: only top-10 tick-tested strategies per batch are stored (records where `ranking.mc95_ret_dd_tick is not None`). Re-running Step 10 against the same folder upserts; new runs accumulate as history rows. Pass threshold defaults to MC95 Tick ≥ 2.0 (configurable via `Settings.TickSurvivalThreshold` in the GUI and `--tick-threshold` CLI arg).
+**Scope**: only the tick-tested strategies per batch are stored (records where `ranking.mc95_ret_dd_tick is not None` — top 20 by default, per `Settings.TickBacktestCount`). Re-running Step 10 against the same folder upserts; new runs accumulate as history rows. Pass threshold defaults to MC95 Tick ≥ 2.0 (configurable via `Settings.TickSurvivalThreshold` in the GUI and `--tick-threshold` CLI arg).
 
 ## Configuration
 

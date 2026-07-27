@@ -419,7 +419,7 @@ def format_duration_friendly(seconds: float) -> str:
         return f"{secs}s"
 
 
-def load_top_strategies(json_path: str, max_strategies: int = 10) -> list[str]:
+def load_top_strategies(json_path: str, max_strategies: int = 20) -> list[str]:
     """
     Load top ranked strategies from strategies_data.json.
 
@@ -583,8 +583,8 @@ Examples:
     parser.add_argument(
         "--max-strategies",
         type=int,
-        default=10,
-        help="Maximum number of strategies to backtest when using --strategies-json (default: 10)",
+        default=20,
+        help="Maximum number of strategies to backtest when using --strategies-json (default: 20)",
     )
 
     args = parser.parse_args()

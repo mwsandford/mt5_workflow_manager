@@ -131,6 +131,9 @@ class Settings:
     QAPath: str = r"C:\QuantAnalyzer4\QuantAnalyzer4.exe"
     QAUseImages: bool = True  # Use image recognition for QA automation (more reliable)
 
+    # Tick backtesting
+    TickBacktestCount: str = "20"  # Top N strategies (by M1 rank) to back test on real ticks
+
     # Tick Survival Analysis
     TickSurvivalThreshold: str = "2.0"  # MC95 Tick at or above which a strategy is "survived"
 
@@ -232,8 +235,8 @@ def build_montecarlo_steps() -> list[WorkflowStep]:
         ),
         WorkflowStep(
             id="rank_strategies",
-            title="Step 2 — Rank by Correlation and Performance",
-            description="Discard correlated strategies and rank remaining strategies",
+            title="Step 2 — Rank by Performance",
+            description="Rank all Monte Carlo survivors by composite performance score",
             script_name="Step7_Strategy_Ranking.py",
             build_args=lambda s: [
                 s.BacktestOutputFolder,
@@ -251,7 +254,7 @@ def build_tick_montecarlo_steps() -> list[WorkflowStep]:
     def build_tick_backtest_args(s):
         # Tick backtests use model 4 (every tick based on real ticks)
         # Output goes to ticks subfolder
-        # Only backtest top KEEP strategies from M1 analysis
+        # Only backtest the top N ranked strategies from the M1 analysis
         return [
             "--mt5-terminal-path", os.path.join(s.MT5Folder, "terminal64.exe"),
             "--report-dest-folder", os.path.join(s.BacktestOutputFolder, "ticks"),
@@ -259,7 +262,7 @@ def build_tick_montecarlo_steps() -> list[WorkflowStep]:
             "--from-date", s.MT5BackTestFrom,
             "--to-date", s.MT5BackTestTo,
             "--strategies-json", os.path.join(s.BacktestOutputFolder, "Dashboard", "strategies_data.json"),
-            "--max-strategies", "10",
+            "--max-strategies", s.TickBacktestCount,
             "--timeout", "1800",
         ]
     
@@ -292,11 +295,12 @@ def build_tick_montecarlo_steps() -> list[WorkflowStep]:
         WorkflowStep(
             id="tick_update_dashboard",
             title="Step 3 — Update Performance Dashboard",
-            description="Update Dashboard with MC95 Tick values",
+            description="Update Dashboard with MC95 Tick values and the tick correlation check",
             script_name="Step8_Update_Dashboard_Tick.py",
             build_args=lambda s: [
                 os.path.join(s.BacktestOutputFolder, "Dashboard"),
                 "--tick-mc-results", os.path.join(s.BacktestOutputFolder, "ticks", "BatchMC_Results.csv"),
+                "--top-n", s.TickBacktestCount,
             ],
             depends_on="tick_mc_analysis",
         ),
@@ -872,6 +876,7 @@ class SettingsPanel(QWidget):
     MONTECARLO_FIELDS = [
         ("QAPath", "Quant Analyzer Exe", False, False),
         ("MC95Threshold", "95% Confidence Level", False, False),
+        ("TickBacktestCount", "Tick Back Test Count", False, False),
         ("TickSurvivalThreshold", "Tick Survival MC95 Min", False, False),
     ]
 

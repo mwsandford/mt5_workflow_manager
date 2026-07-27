@@ -1,14 +1,21 @@
 """
-Strategy Correlation Analysis Tool (with MT5 Backtest Ranking)
+Strategy Ranking Tool (MT5 Backtest Ranking)
 ===============================================================
-Scans a folder for SQX trade list .csv files, analyses pairwise correlation,
-trade overlap, and produces a formatted Excel report with recommendations.
+Scans a folder for SQX trade list .csv files and MT5 Strategy Tester HTML
+reports, and produces a formatted Excel report plus an HTML dashboard.
 
 When --mc-results is provided (recommended), the script first filters strategies
 to only those that pass the Monte Carlo 95% confidence Ret/DD threshold,
-ensuring only robust strategies enter the correlation analysis.
+ensuring only robust strategies are ranked.
 
 Strategies are then ranked using metrics parsed from MT5 Strategy Tester HTML reports.
+
+NOTE: the strategy correlation / cluster / KEEP-ABANDON check no longer runs on
+this (M1) pass. It runs on the tick backtest results instead — see
+Step8_Update_Dashboard_Tick.py, which fills the dashboard's Portfolio,
+Correlation and Clusters tabs and flags correlated rows on the Tick grid.
+The correlation primitives (build_pnl_series / compute_pairwise_correlation /
+identify_clusters) still live here and are imported by Step 8.
 
 Usage:
     python strategy_correlation_analysis.py [folder_path] [options]
@@ -354,8 +361,8 @@ def load_strategies(folder_path):
         except Exception as e:
             print(f"  SKIPPING '{name}': {e}")
 
-    if len(strategies) < 2:
-        print("ERROR: Need at least 2 valid strategy files for correlation analysis.")
+    if len(strategies) < 1:
+        print("ERROR: No valid strategy trade files found.")
         sys.exit(1)
     return strategies
 
@@ -1648,31 +1655,6 @@ def compute_pairwise_correlation(pnl_df, min_observations=10):
     return corr_matrix
 
 
-def compute_trade_overlap(df1, df2):
-    open1 = df1['Open time'].values
-    close1 = df1['Close time'].values
-    open2 = df2['Open time'].values
-    close2 = df2['Close time'].values
-    types1 = df1['Type'].values
-    types2 = df2['Type'].values
-    long_types = {'Buy', 'BuyStop', 'BuyLimit'}
-    overlaps = 0
-    same_dir = 0
-    opp_dir = 0
-    for i in range(len(df1)):
-        mask = (open2 < close1[i]) & (close2 > open1[i])
-        if mask.any():
-            overlaps += 1
-            dir1_long = types1[i] in long_types
-            for j in np.where(mask)[0]:
-                dir2_long = types2[j] in long_types
-                if dir1_long == dir2_long:
-                    same_dir += 1
-                else:
-                    opp_dir += 1
-    return overlaps, same_dir, opp_dir
-
-
 def compute_drawdown_info(df):
     df_sorted = df.sort_values('Close time').reset_index(drop=True)
     equity = df_sorted['Profit/Loss'].cumsum()
@@ -1781,22 +1763,6 @@ def style_cell(ws, row, col, value, fmt=None, bold=False):
     return cell
 
 
-def color_corr_cell(ws, row, col, value):
-    cell = style_cell(ws, row, col, value, fmt='0.000')
-    if value is not None and not np.isnan(value):
-        if abs(value) >= 1.0 - 1e-9:
-            cell.fill = FILL_SELF
-        elif abs(value) >= CORR_VERY_HIGH:
-            cell.fill = FILL_VERY_HIGH
-        elif abs(value) >= CORR_HIGH:
-            cell.fill = FILL_HIGH
-        elif abs(value) >= CORR_MODERATE:
-            cell.fill = FILL_MODERATE
-        else:
-            cell.fill = FILL_LOW
-    return cell
-
-
 def write_title(ws, row, text, merge_end_col=None):
     if merge_end_col:
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=merge_end_col)
@@ -1806,46 +1772,10 @@ def write_title(ws, row, text, merge_end_col=None):
     return cell
 
 
-def write_colour_key(ws, row):
-    ws.cell(row=row, column=1, value='Colour Key:').font = BOLD_FONT
-    keys = [
-        (2, '< 0.3 Low', '6BCB77'),
-        (3, '0.3-0.5 Moderate', 'B5E48C'),
-        (4, '0.5-0.7 High', 'FFD93D'),
-        (5, '> 0.7 Very High', 'FF6B6B'),
-    ]
-    for col, label, color in keys:
-        c = ws.cell(row=row, column=col, value=label)
-        c.fill = PatternFill('solid', fgColor=color)
-        c.font = Font(name='Arial', bold=True, size=9)
-        c.alignment = Alignment(horizontal='center')
-        c.border = THIN_BORDER
-
-
-def write_correlation_sheet(wb, sheet_name, tab_color, title, names, corr_matrix):
-    ws = wb.create_sheet(sheet_name)
-    ws.sheet_properties.tabColor = tab_color
-    n = len(names)
-    write_title(ws, 1, title, merge_end_col=n + 1)
-    row = 3
-    style_header_cell(ws, row, 1, '')
-    for c, name in enumerate(names, 2):
-        style_header_cell(ws, row, c, name)
-    for i, n1 in enumerate(names):
-        r = row + 1 + i
-        cell = style_cell(ws, r, 1, n1, bold=True)
-        cell.fill = SUBHEADER_FILL
-        for j, n2 in enumerate(names):
-            color_corr_cell(ws, r, j + 2, corr_matrix.loc[n1, n2])
-    write_colour_key(ws, row + n + 2)
-    ws.column_dimensions['A'].width = max(len(n) for n in names) + 4
-    for col in range(2, n + 2):
-        ws.column_dimensions[get_column_letter(col)].width = max(len(n) for n in names) + 2
-
 # ============================================================================
 # MT5 RANKING SHEET GENERATION
 # ============================================================================
-def write_mt5_ranking_sheet(wb, ranked_df, keep_strategies):
+def write_mt5_ranking_sheet(wb, ranked_df):
     if ranked_df.empty:
         return
     ws = wb.create_sheet('MT5 Backtest Ranking')
@@ -1856,8 +1786,7 @@ def write_mt5_ranking_sheet(wb, ranked_df, keep_strategies):
             value='MT5 Backtest Rankings \u2014 All Strategies Passing Monte Carlo').font = TITLE_FONT
     ws.merge_cells('A2:Q2')
     ws.cell(row=2, column=1,
-            value=f'{len(ranked_df)} strategies ranked by multi-metric composite score '
-                  f'(KEEP strategies shown in bold)').font = SUBTITLE_FONT
+            value=f'{len(ranked_df)} strategies ranked by multi-metric composite score').font = SUBTITLE_FONT
 
     output_columns = [
         ('Rank',                'Rank',                 6,  '#,##0'),
@@ -1894,7 +1823,6 @@ def write_mt5_ranking_sheet(wb, ranked_df, keep_strategies):
 
     for row_idx, (_, row) in enumerate(ranked_df.iterrows(), header_row + 1):
         rank = row.get('Rank', row_idx - header_row)
-        strategy_name = row.get('Strategy', '')
         for col_idx, (col_name, _, _, fmt) in enumerate(valid_columns, 1):
             val = row.get(col_name, '')
             cell = ws.cell(row=row_idx, column=col_idx, value=val)
@@ -1913,10 +1841,6 @@ def write_mt5_ranking_sheet(wb, ranked_df, keep_strategies):
                     cell.fill = TOP10_FILL
                 elif rank <= 25:
                     cell.fill = TOP25_FILL
-        if strategy_name in keep_strategies:
-            for col_idx in range(1, len(valid_columns) + 1):
-                c = ws.cell(row=row_idx, column=col_idx)
-                c.font = Font(name='Arial', bold=True, size=10)
 
     last_col = get_column_letter(len(valid_columns))
     last_row = header_row + len(ranked_df)
@@ -2070,9 +1994,7 @@ def write_mt5_methodology_sheet(wb):
 # ============================================================================
 # MAIN REPORT GENERATION
 # ============================================================================
-def generate_report(folder_path, strategies, stats, names,
-                    corr_daily, corr_weekly, corr_monthly,
-                    overlap_data, clusters, mt5_folder=None,
+def generate_report(folder_path, strategies, stats, names, mt5_folder=None,
                     mc95_data=None, mc_failed=None, mc_rank_data=None):
     wb = Workbook()
     n = len(names)
@@ -2081,7 +2003,7 @@ def generate_report(folder_path, strategies, stats, names,
     ws = wb.active
     ws.title = 'Summary'
     ws.sheet_properties.tabColor = '2F5496'
-    write_title(ws, 1, 'Strategy Correlation Analysis', merge_end_col=8)
+    write_title(ws, 1, 'Strategy Performance Analysis', merge_end_col=8)
     ws.cell(row=2, column=1, value=f'{n} strategies from: {folder_path}').font = Font(name='Arial', size=9, italic=True)
 
     row = 4
@@ -2116,77 +2038,9 @@ def generate_report(folder_path, strategies, stats, names,
                              f'{len(both_dir)} trade Both directions, {len(short_only)} Short Only.')
         cell.font = WARNING_FONT if len(long_only) > n * 0.6 else BOLD_FONT
         ws.merge_cells(start_row=info_row, start_column=1, end_row=info_row, end_column=8)
-    write_colour_key(ws, info_row + 2)
     for col in range(1, 9):
         ws.column_dimensions[get_column_letter(col)].width = 16
     ws.column_dimensions['A'].width = max(len(nm) for nm in names) + 4
-
-    # Correlation sheets
-    write_correlation_sheet(wb, 'Daily Correlation', '4472C4', 'Daily P&L Correlation Matrix', names, corr_daily)
-    write_correlation_sheet(wb, 'Weekly Correlation', '4472C4', 'Weekly P&L Correlation Matrix', names, corr_weekly)
-    write_correlation_sheet(wb, 'Monthly Correlation', '4472C4', 'Monthly P&L Correlation Matrix', names, corr_monthly)
-
-    # Trade Overlap
-    ws5 = wb.create_sheet('Trade Overlap')
-    ws5.sheet_properties.tabColor = 'ED7D31'
-    write_title(ws5, 1, 'Pairwise Trade Overlap Analysis', merge_end_col=6)
-    row = 3
-    for c, h in enumerate(['Pair', 'Overlapping Trades', 'Overlap %', 'Same Direction', 'Opp Direction', 'Assessment'], 1):
-        style_header_cell(ws5, row, c, h)
-    r = row + 1
-    for (n1, n2), data in sorted(overlap_data.items(), key=lambda x: x[1]['pct'], reverse=True):
-        style_cell(ws5, r, 1, f'{n1} vs {n2}', bold=True)
-        style_cell(ws5, r, 2, f"{data['overlaps']}/{data['total']}")
-        style_cell(ws5, r, 3, data['pct'], fmt='0.0%')
-        style_cell(ws5, r, 4, data['same'], fmt='#,##0')
-        style_cell(ws5, r, 5, data['opp'], fmt='#,##0')
-        pct = data['pct']
-        if pct >= OVERLAP_VERY_HIGH:
-            assessment, color = 'Very High - Likely Redundant', 'FF6B6B'
-        elif pct >= OVERLAP_HIGH:
-            assessment, color = 'High - Significant Overlap', 'FFD93D'
-        elif pct >= OVERLAP_MODERATE:
-            assessment, color = 'Moderate', 'B5E48C'
-        else:
-            assessment, color = 'Low - Good Diversification', '6BCB77'
-        c = style_cell(ws5, r, 6, assessment)
-        c.fill = PatternFill('solid', fgColor=color)
-        r += 1
-    for col in range(1, 7):
-        ws5.column_dimensions[get_column_letter(col)].width = 24
-    ws5.column_dimensions['A'].width = max(len(nm) for nm in names) * 2 + 8
-
-    # Overlap Matrix
-    ws5b = wb.create_sheet('Overlap Matrix')
-    ws5b.sheet_properties.tabColor = 'ED7D31'
-    write_title(ws5b, 1, 'Trade Overlap % Matrix (row strategy overlap with column strategy)', merge_end_col=n + 1)
-    row = 3
-    style_header_cell(ws5b, row, 1, '')
-    for c, name in enumerate(names, 2):
-        style_header_cell(ws5b, row, c, name)
-    for i, n1 in enumerate(names):
-        r = row + 1 + i
-        cell = style_cell(ws5b, r, 1, n1, bold=True)
-        cell.fill = SUBHEADER_FILL
-        for j, n2 in enumerate(names):
-            if n1 == n2:
-                c = style_cell(ws5b, r, j + 2, '-')
-                c.fill = FILL_SELF
-            else:
-                key = (n1, n2) if (n1, n2) in overlap_data else (n2, n1)
-                if key in overlap_data:
-                    if key == (n1, n2):
-                        pct = overlap_data[key]['pct']
-                    else:
-                        pct = overlap_data[key]['overlaps'] / len(strategies[n1]) if len(strategies[n1]) > 0 else 0
-                    c = style_cell(ws5b, r, j + 2, pct, fmt='0.0%')
-                    if pct >= OVERLAP_VERY_HIGH: c.fill = FILL_VERY_HIGH
-                    elif pct >= OVERLAP_HIGH: c.fill = FILL_HIGH
-                    elif pct >= OVERLAP_MODERATE: c.fill = FILL_MODERATE
-                    else: c.fill = FILL_LOW
-    ws5b.column_dimensions['A'].width = max(len(nm) for nm in names) + 4
-    for col in range(2, n + 2):
-        ws5b.column_dimensions[get_column_letter(col)].width = max(len(nm) for nm in names) + 2
 
     # Drawdown Periods
     ws6 = wb.create_sheet('Drawdown Periods')
@@ -2207,63 +2061,12 @@ def generate_report(folder_path, strategies, stats, names,
         ws6.column_dimensions[get_column_letter(col)].width = 20
     ws6.column_dimensions['A'].width = max(len(nm) for nm in names) + 4
 
-    # Clusters
-    ws7 = wb.create_sheet('Correlation Clusters')
-    ws7.sheet_properties.tabColor = '70AD47'
-    write_title(ws7, 1, 'Strategy Clusters (Weekly Correlation >= 0.5)', merge_end_col=3)
-    ws7.cell(row=2, column=1,
-             value='Strategies within the same cluster are correlated \u2014 consider picking the best performer from each.').font = \
-        Font(name='Arial', size=10, italic=True)
-    row = 4
-    for c, h in enumerate(['Cluster', 'Strategies', 'Count'], 1):
-        style_header_cell(ws7, row, c, h)
-    for i, cluster in enumerate(clusters):
-        r = row + 1 + i
-        style_cell(ws7, r, 1, f'Cluster {i + 1}', bold=True)
-        style_cell(ws7, r, 2, ', '.join(cluster))
-        cell = style_cell(ws7, r, 3, len(cluster), fmt='#,##0')
-        if len(cluster) == 1: cell.fill = FILL_LOW
-        elif len(cluster) <= 3: cell.fill = FILL_MODERATE
-        else: cell.fill = FILL_HIGH
-    ws7.column_dimensions['A'].width = 14
-    ws7.column_dimensions['B'].width = max(40, max(len(', '.join(c)) for c in clusters) + 4)
-    ws7.column_dimensions['C'].width = 10
-    summary_row = row + len(clusters) + 2
-    ws7.merge_cells(start_row=summary_row, start_column=1, end_row=summary_row, end_column=3)
-    ws7.cell(row=summary_row, column=1,
-             value=f'{len(clusters)} independent cluster(s) identified from {n} strategies. '
-                   f'Consider selecting ~{len(clusters)} strategies (1 per cluster) for optimal diversification.').font = SUCCESS_FONT
-
-    # Best Pairs
-    ws8 = wb.create_sheet('Best Pairs')
-    ws8.sheet_properties.tabColor = '70AD47'
-    write_title(ws8, 1, 'Strategy Pairs Ranked by Diversification Benefit (Lowest Weekly Correlation)', merge_end_col=4)
-    row = 3
-    for c, h in enumerate(['Rank', 'Pair', 'Weekly Correlation', 'Daily Correlation'], 1):
-        style_header_cell(ws8, row, c, h)
-    pairs = []
-    for i, n1 in enumerate(names):
-        for j, n2 in enumerate(names):
-            if j > i:
-                pairs.append((n1, n2, corr_weekly.loc[n1, n2], corr_daily.loc[n1, n2]))
-    pairs.sort(key=lambda x: abs(x[2]))
-    for rank, (n1, n2, wcorr, dcorr) in enumerate(pairs, 1):
-        r = row + rank
-        style_cell(ws8, r, 1, rank)
-        style_cell(ws8, r, 2, f'{n1} vs {n2}', bold=True)
-        color_corr_cell(ws8, r, 3, wcorr)
-        color_corr_cell(ws8, r, 4, dcorr)
-    ws8.column_dimensions['A'].width = 8
-    ws8.column_dimensions['B'].width = max(len(nm) for nm in names) * 2 + 8
-    ws8.column_dimensions['C'].width = 20
-    ws8.column_dimensions['D'].width = 20
-
     # =========================================================================
-    # STEP 1: Rank ALL strategies on MT5 metrics FIRST (before cluster selection)
+    # Rank ALL strategies on MT5 metrics
     # =========================================================================
     ranked_df = None
     mt5_metrics = None
-    strategy_scores = {}  # name -> composite score (for cluster selection)
+    strategy_scores = {}  # name -> composite score
 
     if mt5_folder:
         print("\nLoading MT5 backtest reports for ALL strategies...")
@@ -2284,126 +2087,22 @@ def generate_report(folder_path, strategies, stats, names,
                             mc95_vals.append(None)
                     ranked_df['MC95 Ret/DD'] = mc95_vals
 
-                # Build score lookup for cluster selection
+                # Build score lookup
                 for _, row in ranked_df.iterrows():
                     strategy_scores[row['Strategy']] = row['Composite Score']
 
-    # =========================================================================
-    # STEP 2: Portfolio Selection — use composite score to pick cluster survivors
-    # =========================================================================
-    ws_ps = wb.create_sheet('Portfolio Selection', 0)
-    ws_ps.sheet_properties.tabColor = '70AD47'
-
-    keep = {}
-    abandon = {}
-    for cid, members in enumerate(clusters, 1):
-        if len(members) == 1:
-            keep[members[0]] = cid
-        else:
-            if strategy_scores:
-                # Use composite score (higher is better) — the key improvement
-                best = max(members, key=lambda s: strategy_scores.get(s, -1))
-            else:
-                # Fallback to P&L if no MT5 reports available
-                best = max(members, key=lambda s: stats[s]['total_pnl'])
-            keep[best] = cid
-            for s in members:
-                if s != best:
-                    abandon[s] = (cid, best)
-
-    max_name_len = max(len(nm) for nm in names)
-    ws_ps.merge_cells('A1:H1')
-    ws_ps.cell(row=1, column=1, value='Portfolio Selection \u2014 Which Strategies to Keep vs Abandon').font = TITLE_FONT
-    selection_method = 'composite score' if strategy_scores else 'total P&L'
-    ws_ps.merge_cells('A2:H2')
-    ws_ps.cell(row=2, column=1,
-               value=f'Selecting best performer (by {selection_method}) from each correlation cluster: '
-                     f'{len(keep)} KEEP, {len(abandon)} ABANDON').font = SUBTITLE_FONT
-
-    row = 4
-    ps_headers = ['Strategy', 'Decision', 'Cluster', 'Reason', 'Direction', 'Total P&L ($)', 'Avg Trade ($)', 'Win Rate']
-    for c, h in enumerate(ps_headers, 1):
-        style_header_cell(ws_ps, row, c, h)
-
-    r = row + 1
-    for name in sorted(keep.keys(), key=lambda s: keep[s]):
-        cid = keep[name]
-        s = stats[name]
-        cluster_size = len(clusters[cid - 1])
-        if cluster_size == 1:
-            reason = 'Only strategy in cluster'
-        elif strategy_scores:
-            score = strategy_scores.get(name, 0)
-            reason = f'Best composite score ({score:.3f}) in cluster of {cluster_size}'
-        else:
-            reason = f'Best P&L in cluster of {cluster_size}'
-        for col_idx, val in enumerate([name, '\u2713 KEEP', f'Cluster {cid}', reason,
-                                       s['direction'], s['total_pnl'], s['avg_trade'], s['win_rate']], 1):
-            fmt = None
-            if col_idx == 6: fmt = '#,##0.00'
-            elif col_idx == 7: fmt = '#,##0.00'
-            elif col_idx == 8: fmt = '0.0%'
-            cell = style_cell(ws_ps, r, col_idx, val, fmt=fmt)
-            cell.font = KEEP_FONT
-            cell.fill = KEEP_FILL
-        r += 1
-
-    r += 1
-    for name in sorted(abandon.keys(), key=lambda s: abandon[s][0]):
-        cid, replaced_by = abandon[name]
-        s = stats[name]
-        if strategy_scores:
-            my_score = strategy_scores.get(name, 0)
-            their_score = strategy_scores.get(replaced_by, 0)
-            reason = f'Redundant \u2014 correlated with {replaced_by} (score {their_score:.3f} vs {my_score:.3f})'
-        else:
-            reason = f'Redundant \u2014 correlated with {replaced_by}'
-        for col_idx, val in enumerate([name, '\u2717 ABANDON', f'Cluster {cid}', reason,
-                                       s['direction'], s['total_pnl'], s['avg_trade'], s['win_rate']], 1):
-            fmt = None
-            if col_idx == 6: fmt = '#,##0.00'
-            elif col_idx == 7: fmt = '#,##0.00'
-            elif col_idx == 8: fmt = '0.0%'
-            cell = style_cell(ws_ps, r, col_idx, val, fmt=fmt)
-            cell.font = ABANDON_FONT
-            cell.fill = ABANDON_FILL
-        r += 1
-
-    r += 2
-    ws_ps.merge_cells(start_row=r, start_column=1, end_row=r, end_column=8)
-    ws_ps.cell(row=r, column=1, value='Summary').font = Font(name='Arial', bold=True, size=12, color='2F5496')
-    r += 1
-    keep_pnl = sum(stats[s]['total_pnl'] for s in keep)
-    abandon_pnl = sum(stats[s]['total_pnl'] for s in abandon)
-    keep_long_only = sum(1 for s in keep if stats[s]['direction'] == 'Long Only')
-    keep_both = sum(1 for s in keep if stats[s]['direction'] == 'Both')
-    summaries = [
-        f'Portfolio reduced from {n} \u2192 {len(keep)} strategies (removed {len(abandon)} redundant)',
-        f'KEEP total P&L: ${keep_pnl:,.0f}  |  ABANDON total P&L: ${abandon_pnl:,.0f}',
-        f'Direction mix in KEEP portfolio: {keep_long_only} Long Only + {keep_both} Both Directions',
-        f'Selection method: Highest {selection_method} from each weekly correlation cluster (threshold \u2265 0.5)',
-    ]
-    for line in summaries:
-        ws_ps.merge_cells(start_row=r, start_column=1, end_row=r, end_column=8)
-        ws_ps.cell(row=r, column=1, value=line).font = NORMAL_FONT
-        r += 1
-    ps_widths = [max_name_len + 4, 14, 12, max_name_len + 24, 12, 14, 14, 10]
-    for i, w in enumerate(ps_widths, 1):
-        ws_ps.column_dimensions[get_column_letter(i)].width = w
-
-    # Write MT5 Ranking sheets (data already computed in Step 1)
+    # Write MT5 Ranking sheets
     if ranked_df is not None and not ranked_df.empty:
-        write_mt5_ranking_sheet(wb, ranked_df, set(keep.keys()))
+        write_mt5_ranking_sheet(wb, ranked_df)
         write_mt5_methodology_sheet(wb)
         print(f"\n{'='*90}")
         print(f"  MT5 BACKTEST RANKINGS (ALL strategies)")
         print(f"{'='*90}")
         print(f"{'Rank':>4}  {'Score':>6}  {'Strategy':<32}  {'Profit':>10}  {'Ret/DD':>6}  "
-              f"{'PF':>5}  {'Sharpe':>6}  {'LR Corr':>7}  {'Trades':>6}  {'Status':>8}")
+              f"{'PF':>5}  {'Sharpe':>6}  {'LR Corr':>7}  {'Trades':>6}")
         print(f"{'-'*100}")
         for _, row in ranked_df.iterrows():
             sname = row['Strategy']
-            status = 'KEEP' if sname in keep else 'ABANDON'
             print(f"#{int(row['Rank']):3d}  {row['Composite Score']:6.3f}  "
                   f"{sname:<32.32s}  "
                   f"${row.get('Total Net Profit', 0):9.2f}  "
@@ -2411,8 +2110,7 @@ def generate_report(folder_path, strategies, stats, names,
                   f"{row.get('Profit Factor', 0):5.2f}  "
                   f"{row.get('Sharpe Ratio', 0):6.2f}  "
                   f"{row.get('LR Correlation', 0):7.2f}  "
-                  f"{int(row.get('Total Trades', 0)):6d}  "
-                  f"{'  ' + status:>8s}")
+                  f"{int(row.get('Total Trades', 0)):6d}")
         print(f"{'='*100}")
     elif mt5_folder:
         print("  No MT5 reports matched strategies - skipping ranking sheets.")
@@ -2458,8 +2156,6 @@ def generate_report(folder_path, strategies, stats, names,
     try:
         dashboard_path = generate_dashboard(
             folder_path, strategies, stats, names,
-            corr_daily, corr_weekly, corr_monthly,
-            overlap_data, clusters,
             ranked_df=ranked_df,
             mt5_metrics=mt5_metrics,
             mt5_folder=mt5_folder,
@@ -2467,8 +2163,6 @@ def generate_report(folder_path, strategies, stats, names,
             mc95_data=mc95_data,
             mc_failed=mc_failed,
             mt5_overviews=mt5_overviews,
-            keep=keep,
-            abandon=abandon,
             strategy_scores=strategy_scores,
             strategy_codes=strategy_codes,
             sqx_metadata=sqx_metadata,
@@ -2489,7 +2183,7 @@ def generate_report(folder_path, strategies, stats, names,
         print(f"  WARNING: Dashboard generation failed: {e}")
         traceback.print_exc()
 
-    return output_path, keep, abandon, strategy_scores
+    return output_path, strategy_scores
 
 
 
@@ -2511,14 +2205,72 @@ def find_equity_chart(strategy_name, folder_path):
     return None
 
 
-def generate_dashboard(folder_path, strategies, stats, names,
-                       corr_daily, corr_weekly, corr_monthly,
-                       overlap_data, clusters, ranked_df=None,
+def shape_overview_for_js(ov):
+    """Round/normalise a parse_mt5_full_overview() dict for the dashboard DATA object.
+
+    Shared by Step 7 (M1 overviews -> DATA.overviews) and Step 8 (tick overviews
+    -> DATA.tick_overviews) so both models render through identical field names.
+    """
+    return {
+        'symbol': ov.get('symbol', ''),
+        'period': ov.get('period', ''),
+        'total_profit': round(ov.get('total_profit', 0), 2),
+        'gross_profit': round(ov.get('gross_profit', 0), 2),
+        'gross_loss': round(ov.get('gross_loss', 0), 2),
+        'profit_factor': round(ov.get('profit_factor', 0), 2),
+        'expected_payoff': round(ov.get('expected_payoff', 0), 2),
+        'recovery_factor': round(ov.get('recovery_factor', 0), 2),
+        'sharpe': round(ov.get('sharpe', 0), 2),
+        'lr_corr': round(ov.get('lr_corr', 0), 2),
+        'lr_stderr': round(ov.get('lr_stderr', 0), 2),
+        'total_trades': ov.get('total_trades', 0),
+        'avg_win': round(ov.get('avg_win', 0), 2),
+        'avg_loss': round(ov.get('avg_loss', 0), 2),
+        'largest_win': round(ov.get('largest_win', 0), 2),
+        'largest_loss': round(ov.get('largest_loss', 0), 2),
+        'bal_dd_max': round(ov.get('bal_dd_max', 0), 2),
+        'bal_dd_max_pct': round(ov.get('bal_dd_max_pct', 0), 1),
+        'eq_dd_max': round(ov.get('eq_dd_max', 0), 2),
+        'eq_dd_max_pct': round(ov.get('eq_dd_max_pct', 0), 1),
+        'win_trades': ov.get('win_trades', 0),
+        'win_rate': round(ov.get('win_rate', 0), 1),
+        'loss_trades': ov.get('loss_trades', 0),
+        'short_trades': ov.get('short_trades', 0),
+        'short_win_pct': round(ov.get('short_win_pct', 0), 1),
+        'long_trades': ov.get('long_trades', 0),
+        'long_win_pct': round(ov.get('long_win_pct', 0), 1),
+        'max_consec_wins': ov.get('max_consec_wins', 0),
+        'max_consec_losses': ov.get('max_consec_losses', 0),
+        'avg_consec_wins': ov.get('avg_consec_wins', 0),
+        'avg_consec_losses': ov.get('avg_consec_losses', 0),
+        'ret_dd': round(ov.get('ret_dd', 0), 2),
+        'wl_ratio': round(ov.get('wl_ratio', 0), 2),
+        'payout_ratio': round(ov.get('payout_ratio', 0), 2),
+        'dd_dollar': round(ov.get('dd_dollar', 0), 2),
+        'dd_pct': round(ov.get('dd_pct', 0), 1),
+        'monthly_avg_profit': round(ov.get('monthly_avg_profit', 0), 2),
+        'cagr': ov.get('cagr', 0),
+        'stagnation_days': ov.get('stagnation_days', 0),
+        'stagnation_pct': ov.get('stagnation_pct', 0),
+        'yearly_avg_profit': round(ov.get('yearly_avg_profit', 0), 2),
+        'yearly_avg_return_pct': round(ov.get('yearly_avg_return_pct', 0), 2),
+        'daily_avg_profit': round(ov.get('daily_avg_profit', 0), 2),
+        'annual_dd_ratio': ov.get('annual_dd_ratio', 0),
+        'monthly_pnl': ov.get('monthly_pnl', {}),
+    }
+
+
+def generate_dashboard(folder_path, strategies, stats, names, ranked_df=None,
                        mt5_metrics=None, mt5_folder=None, chart_map=None,
                        mc95_data=None, mc_failed=None, mt5_overviews=None,
-                       keep=None, abandon=None, strategy_scores=None,
+                       strategy_scores=None,
                        strategy_codes=None, sqx_metadata=None, mc_rank_data=None):
-    """Generate the HTML dashboard."""
+    """Generate the HTML dashboard.
+
+    The correlation / cluster / portfolio sections are emitted empty here — they
+    are filled in by Step8_Update_Dashboard_Tick.py from the tick backtest
+    results, which is where the correlation check now runs.
+    """
 
     def _safe(val, decimals=2, as_int=False):
         """Safely convert a value for JSON — handles NaN, None, numpy types."""
@@ -2535,24 +2287,6 @@ def generate_dashboard(folder_path, strategies, stats, names,
             return 0
 
     n = len(names)
-
-    # Use keep/abandon from caller (already computed using composite score)
-    if keep is None or abandon is None:
-        # Fallback: compute locally (should not normally happen)
-        keep = {}
-        abandon = {}
-        for cid, members in enumerate(clusters, 1):
-            if len(members) == 1:
-                keep[members[0]] = cid
-            else:
-                if strategy_scores:
-                    best = max(members, key=lambda s: strategy_scores.get(s, -1))
-                else:
-                    best = max(members, key=lambda s: stats[s]['total_pnl'])
-                keep[best] = cid
-                for s in members:
-                    if s != best:
-                        abandon[s] = (cid, best)
 
     # Use provided chart_map or empty
     if chart_map is None:
@@ -2661,162 +2395,20 @@ def generate_dashboard(folder_path, strategies, stats, names,
                 'chart': chart_b64.get(name, ''),
             })
 
+    # Correlation-driven sections (portfolio / correlation matrices / clusters /
+    # best pairs) are no longer computed on the M1 pass. They are emitted empty
+    # and filled in by Step8_Update_Dashboard_Tick.py from the tick backtests.
     portfolio_data = []
-    for name in sorted(keep.keys(), key=lambda s: keep[s]):
-        cid = keep[name]
-        s = stats[name]
-        mc = _get_mc95(name)
-        cluster_size = len(clusters[cid - 1])
-        if cluster_size == 1:
-            reason = 'Only in cluster'
-        elif strategy_scores and name in strategy_scores:
-            reason = f'Best score ({strategy_scores[name]:.3f}) in cluster of {cluster_size}'
-        else:
-            reason = f'Best P&L in cluster of {cluster_size}'
-        portfolio_data.append({
-            'name': name, 'decision': 'KEEP', 'cluster': cid,
-            'reason': reason,
-            'direction': _get_direction(name),
-            'total_pnl': round(s['total_pnl'], 2),
-            'avg_trade': round(s['avg_trade'], 2),
-            'win_rate': round(s['win_rate'] * 100, 1),
-            'mc95_ret_dd': mc.get('mc95_ret_dd', 0),
-            'mc95_ret_dd_tick': None,  # Placeholder for tick-based MC95 Ret/DD
-            'chart': chart_b64.get(name, ''),
-        })
-    for name in sorted(abandon.keys(), key=lambda s: abandon[s][0]):
-        cid, replaced_by = abandon[name]
-        s = stats[name]
-        mc = _get_mc95(name)
-        if strategy_scores and name in strategy_scores:
-            my_score = strategy_scores.get(name, 0)
-            their_score = strategy_scores.get(replaced_by, 0)
-            reason = f'Correlated with {replaced_by} (score {their_score:.3f} vs {my_score:.3f})'
-        else:
-            reason = f'Redundant \u2014 correlated with {replaced_by}'
-        portfolio_data.append({
-            'name': name, 'decision': 'ABANDON', 'cluster': cid,
-            'reason': reason,
-            'direction': _get_direction(name),
-            'total_pnl': round(s['total_pnl'], 2),
-            'avg_trade': round(s['avg_trade'], 2),
-            'win_rate': round(s['win_rate'] * 100, 1),
-            'mc95_ret_dd': mc.get('mc95_ret_dd', 0),
-            'mc95_ret_dd_tick': None,  # Placeholder for tick-based MC95 Ret/DD
-            'chart': chart_b64.get(name, ''),
-        })
-
-    # Correlation matrices as nested lists
-    def corr_to_list(corr_matrix):
-        result = []
-        for n1 in names:
-            row = []
-            for n2 in names:
-                val = corr_matrix.loc[n1, n2]
-                row.append(_safe(val, 3))
-            result.append(row)
-        return result
-
-    corr_data = {
-        'daily': corr_to_list(corr_daily),
-        'weekly': corr_to_list(corr_weekly),
-        'monthly': corr_to_list(corr_monthly),
-    }
-
-    # Overlap pairs
-    overlap_list = []
-    for (n1, n2), data in sorted(overlap_data.items(), key=lambda x: x[1]['pct'], reverse=True):
-        overlap_list.append({
-            'pair': f'{n1} vs {n2}',
-            'overlaps': data['overlaps'], 'total': data['total'],
-            'pct': round(data['pct'] * 100, 1),
-            'same': data['same'], 'opp': data['opp'],
-        })
-
-    # Clusters
+    corr_names = []
+    corr_data = {'daily': [], 'weekly': [], 'monthly': []}
     cluster_data = []
-    for i, cluster in enumerate(clusters):
-        cluster_data.append({'id': i + 1, 'members': cluster, 'count': len(cluster)})
-
-    # Best pairs (lowest weekly correlation)
     pairs_list = []
-    for i, n1 in enumerate(names):
-        for j, n2 in enumerate(names):
-            if j > i:
-                pairs_list.append({
-                    'pair': f'{n1} vs {n2}',
-                    'weekly': round(float(corr_weekly.loc[n1, n2]), 3),
-                    'daily': round(float(corr_daily.loc[n1, n2]), 3),
-                })
-    pairs_list.sort(key=lambda x: abs(x['weekly']))
-
-    # Drawdown data
-    dd_data = []
-    for name in names:
-        s = stats[name]
-        dd_data.append({
-            'name': name,
-            'max_dd': round(s['max_dd'], 2),
-            'dd_start': s['dd_start'].strftime('%Y-%m-%d'),
-            'dd_end': s['dd_end'].strftime('%Y-%m-%d'),
-            'dd_days': s['dd_days'],
-        })
-
-    # Summary stats for cards
-    keep_pnl = sum(stats[s]['total_pnl'] for s in keep)
-    abandon_pnl = sum(stats[s]['total_pnl'] for s in abandon)
 
     # Build overviews dict for JS (keyed by strategy name)
     overview_js = {}
     if mt5_overviews:
         for name, ov in mt5_overviews.items():
-            overview_js[name] = {
-                'symbol': ov.get('symbol', ''),
-                'period': ov.get('period', ''),
-                'total_profit': round(ov.get('total_profit', 0), 2),
-                'gross_profit': round(ov.get('gross_profit', 0), 2),
-                'gross_loss': round(ov.get('gross_loss', 0), 2),
-                'profit_factor': round(ov.get('profit_factor', 0), 2),
-                'expected_payoff': round(ov.get('expected_payoff', 0), 2),
-                'recovery_factor': round(ov.get('recovery_factor', 0), 2),
-                'sharpe': round(ov.get('sharpe', 0), 2),
-                'lr_corr': round(ov.get('lr_corr', 0), 2),
-                'lr_stderr': round(ov.get('lr_stderr', 0), 2),
-                'total_trades': ov.get('total_trades', 0),
-                'avg_win': round(ov.get('avg_win', 0), 2),
-                'avg_loss': round(ov.get('avg_loss', 0), 2),
-                'largest_win': round(ov.get('largest_win', 0), 2),
-                'largest_loss': round(ov.get('largest_loss', 0), 2),
-                'bal_dd_max': round(ov.get('bal_dd_max', 0), 2),
-                'bal_dd_max_pct': round(ov.get('bal_dd_max_pct', 0), 1),
-                'eq_dd_max': round(ov.get('eq_dd_max', 0), 2),
-                'eq_dd_max_pct': round(ov.get('eq_dd_max_pct', 0), 1),
-                'win_trades': ov.get('win_trades', 0),
-                'win_rate': round(ov.get('win_rate', 0), 1),
-                'loss_trades': ov.get('loss_trades', 0),
-                'short_trades': ov.get('short_trades', 0),
-                'short_win_pct': round(ov.get('short_win_pct', 0), 1),
-                'long_trades': ov.get('long_trades', 0),
-                'long_win_pct': round(ov.get('long_win_pct', 0), 1),
-                'max_consec_wins': ov.get('max_consec_wins', 0),
-                'max_consec_losses': ov.get('max_consec_losses', 0),
-                'avg_consec_wins': ov.get('avg_consec_wins', 0),
-                'avg_consec_losses': ov.get('avg_consec_losses', 0),
-                'ret_dd': round(ov.get('ret_dd', 0), 2),
-                'wl_ratio': round(ov.get('wl_ratio', 0), 2),
-                'payout_ratio': round(ov.get('payout_ratio', 0), 2),
-                'dd_dollar': round(ov.get('dd_dollar', 0), 2),
-                'dd_pct': round(ov.get('dd_pct', 0), 1),
-                'monthly_avg_profit': round(ov.get('monthly_avg_profit', 0), 2),
-                'cagr': ov.get('cagr', 0),
-                'stagnation_days': ov.get('stagnation_days', 0),
-                'stagnation_pct': ov.get('stagnation_pct', 0),
-                'yearly_avg_profit': round(ov.get('yearly_avg_profit', 0), 2),
-                'yearly_avg_return_pct': round(ov.get('yearly_avg_return_pct', 0), 2),
-                'daily_avg_profit': round(ov.get('daily_avg_profit', 0), 2),
-                'annual_dd_ratio': ov.get('annual_dd_ratio', 0),
-                'monthly_pnl': ov.get('monthly_pnl', {}),
-            }
+            overview_js[name] = shape_overview_for_js(ov)
 
     # Strategy pseudo code data
     codes_js = {}
@@ -2855,25 +2447,27 @@ def generate_dashboard(folder_path, strategies, stats, names,
         # Populated later by Step 8 from the tick backtest .htm reports + tick MC.
         # Empty here so the M1/Tick toggle renders (with an empty-state) pre-tick-run.
         'tick_ranking': [],
+        # Per-strategy overview parsed from the *tick* reports. Keyed by name, same
+        # shape as 'overviews'. Filled in by Step 8; empty until the tick pass runs.
+        'tick_overviews': {},
+        # Tick correlation output — all filled in by Step 8 (see note above)
         'portfolio': portfolio_data,
+        'corr_names': corr_names,
+        'correlations': corr_data,
+        'clusters': cluster_data,
+        'best_pairs': pairs_list,
         'mc_failed': mc_failed or [],
         'overviews': overview_js,
         'strategy_codes': codes_js,
         'sqx_metadata': sqx_meta_js,
-        'correlations': corr_data,
-        'overlap': overlap_list,
-        'clusters': cluster_data,
-        'best_pairs': pairs_list,
-        'drawdowns': dd_data,
         'cards': {
             'total_strategies': n,
-            'clusters': len(clusters),
-            'keep': len(keep),
-            'abandon': len(abandon),
-            'keep_pnl': round(keep_pnl, 0),
-            'abandon_pnl': round(abandon_pnl, 0),
             'ranked': len(ranking_data),
             'mc_failed': len(mc_failed or []),
+            # Tick correlation cards — populated by Step 8
+            'tick_clusters': 0,
+            'tick_keep': 0,
+            'tick_abandon': 0,
         },
     }
 
@@ -2893,7 +2487,12 @@ def generate_dashboard(folder_path, strategies, stats, names,
     strategies_export = {
         'ranking': js_data.get('ranking', []),
         'tick_ranking': js_data.get('tick_ranking', []),
+        'tick_overviews': js_data.get('tick_overviews', {}),
+        # Tick correlation results — written back by Step 8
         'portfolio': js_data.get('portfolio', []),
+        'corr_names': js_data.get('corr_names', []),
+        'correlations': js_data.get('correlations', {}),
+        'best_pairs': js_data.get('best_pairs', []),
         'strategies': js_data.get('strategies', []),
         'mc_failed': js_data.get('mc_failed', []),
         'clusters': js_data.get('clusters', []),
@@ -2958,7 +2557,7 @@ def build_html(data):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Strategy Correlation Analysis</title>
+<title>Strategy Analysis</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -2978,9 +2577,7 @@ def build_html(data):
       <button class="tab" data-tab="mc-failed">MC Failed</button>
       <button class="tab" data-tab="portfolio">Portfolio</button>
       <button class="tab" data-tab="correlation">Correlation</button>
-      <button class="tab" data-tab="overlap">Overlap</button>
       <button class="tab" data-tab="clusters">Clusters</button>
-      <button class="tab" data-tab="drawdowns">Drawdowns</button>
       <button class="tab" data-tab="methodology">Methodology</button>
     </nav>
   </header>
@@ -2995,9 +2592,7 @@ def build_html(data):
       <div class="panel hidden" id="panel-mc-failed"></div>
       <div class="panel hidden" id="panel-portfolio"></div>
       <div class="panel hidden" id="panel-correlation"></div>
-      <div class="panel hidden" id="panel-overlap"></div>
       <div class="panel hidden" id="panel-clusters"></div>
-      <div class="panel hidden" id="panel-drawdowns"></div>
       <div class="panel hidden" id="panel-methodology"></div>
     </div>
     <div class="side-panel hidden" id="sidePanel">
@@ -3464,14 +3059,15 @@ JS_BLOCK = r"""
   });
 
   // === Summary Cards ===
+  // Cluster / Keep / Abandon are tick-level concepts — the correlation check runs
+  // on the tick backtests (Step 8), so those cards only appear once tick data lands.
   const c = DATA.cards;
   $('#summaryCards').innerHTML = `
     <div class="card"><div class="card-label">Strategies</div><div class="card-value accent">${c.total_strategies}</div></div>
-    <div class="card"><div class="card-label">Clusters</div><div class="card-value">${c.clusters}</div></div>
-    <div class="card"><div class="card-label">Keep</div><div class="card-value green">${c.keep}</div></div>
-    <div class="card"><div class="card-label">Abandon</div><div class="card-value red">${c.abandon}</div></div>
-    <div class="card"><div class="card-label">Keep P&L</div><div class="card-value green">$${c.keep_pnl.toLocaleString()}</div></div>
     ${c.ranked ? `<div class="card"><div class="card-label">MT5 Ranked</div><div class="card-value amber">${c.ranked}</div></div>` : ''}
+    ${c.tick_clusters ? `<div class="card"><div class="card-label">Tick Clusters</div><div class="card-value">${c.tick_clusters}</div></div>` : ''}
+    ${c.tick_keep ? `<div class="card"><div class="card-label">Tick Keep</div><div class="card-value green">${c.tick_keep}</div></div>` : ''}
+    ${c.tick_abandon ? `<div class="card"><div class="card-label">Tick Abandon</div><div class="card-value red">${c.tick_abandon}</div></div>` : ''}
     ${c.mc_failed ? `<div class="card"><div class="card-label">MC Failed</div><div class="card-value red">${c.mc_failed}</div></div>` : ''}
   `;
 
@@ -3509,20 +3105,27 @@ JS_BLOCK = r"""
   $('#closeSidePanel').addEventListener('click', closeSidePanel);
 
   // === Overview Panel (QA4-style summary) ===
-  function openOverviewPanel(name) {
+  // useTick=true reads the tick-report overview + tick ranking row, so every
+  // number in the panel matches the grid it was opened from.
+  function overviewFor(name, useTick) {
+    return useTick ? (DATA.tick_overviews || {})[name] : DATA.overviews[name];
+  }
+
+  function openOverviewPanel(name, useTick) {
     const sp = $('#sidePanel');
     const body = $('#sidePanelBody');
-    const ov = DATA.overviews[name];
+    const ov = overviewFor(name, useTick);
     if (!ov) return;
 
-    $('#sidePanelTitle').textContent = name;
+    $('#sidePanelTitle').textContent = name + (useTick ? ' — Tick' : ' — M1');
 
     const fmt = v => typeof v === 'number' ? '$' + v.toLocaleString(undefined, {minimumFractionDigits:2}) : v;
     const n = v => typeof v === 'number' ? v.toLocaleString(undefined, {minimumFractionDigits:2}) : v;
     const pct = v => v + '%';
 
-    // Look up MC95 Ret/DD from ranking data
-    const rk = DATA.ranking.find(x => x.name === name);
+    // Look up MC95 Ret/DD from the ranking data for the model being shown —
+    // on the Tick panel this must be the tick Monte Carlo value, not the M1 one.
+    const rk = (useTick ? (DATA.tick_ranking || []) : DATA.ranking).find(x => x.name === name);
     const mc95val = rk && rk.mc95_ret_dd ? rk.mc95_ret_dd : null;
 
     let html = `<div class="ov-grid">
@@ -3676,9 +3279,38 @@ JS_BLOCK = r"""
     const ranking = (useTick ? DATA.tick_ranking : DATA.ranking).find(r => r.name === name);
     const summary = DATA.summary.find(s => s.name === name);
     const portfolio = DATA.portfolio.find(p => p.name === name);
-    const overview = DATA.overviews[name] || null;
+    const overview = overviewFor(name, useTick) || null;
     const code = DATA.strategy_codes[name] || null;
     const sqxMeta = DATA.sqx_metadata[name] || null;
+
+    // DATA.summary is built from the SQX/M1 trade lists, so it can't be reused for
+    // a tick export. Rebuild the same five fields from the tick overview instead,
+    // taking direction from the tick portfolio row (derived from the tick trades).
+    let summaryBlock = null;
+    if (useTick) {
+      if (overview) {
+        let dir = portfolio ? portfolio.direction : null;
+        if (!dir) {
+          const lng = overview.long_trades || 0, sht = overview.short_trades || 0;
+          dir = sht === 0 ? 'Long Only' : (lng === 0 ? 'Short Only' : 'Both');
+        }
+        summaryBlock = {
+          total_pnl: overview.total_profit,
+          num_trades: overview.total_trades,
+          win_rate: overview.win_rate,
+          avg_trade: overview.expected_payoff,
+          direction: dir,
+        };
+      }
+    } else if (summary) {
+      summaryBlock = {
+        total_pnl: summary.total_pnl,
+        num_trades: summary.trades,
+        win_rate: summary.win_rate,
+        avg_trade: summary.avg_trade,
+        direction: summary.direction,
+      };
+    }
 
     const exportData = {
       _export_version: '1.0',
@@ -3734,13 +3366,7 @@ JS_BLOCK = r"""
         sqx_metadata: sqxMeta ? {
           complexity: sqxMeta.complexity,
         } : null,
-        summary: summary ? {
-          total_pnl: summary.total_pnl,
-          num_trades: summary.num_trades,
-          win_rate: summary.win_rate,
-          avg_trade: summary.avg_trade,
-          direction: summary.direction,
-        } : null,
+        summary: summaryBlock,
       },
 
       // ── Maps to: backtest_equitychart TEXT column ──
@@ -3866,7 +3492,8 @@ JS_BLOCK = r"""
       '<div id="gridM1"></div>' +
       '<div id="gridTick" class="hidden"></div>';
 
-    // Portfolio decisions drive ABANDON badges — an M1-level concept only
+    // Portfolio decisions drive ABANDON badges. The correlation check runs on the
+    // tick backtests (Step 8), so the badges belong to the Tick grid only.
     const portfolioDecisions = {};
     const portfolioReasons = {};
     if (DATA.portfolio) {
@@ -3892,14 +3519,18 @@ JS_BLOCK = r"""
             : '0 strategies') + '</div>';
         return;
       }
+      const tickAbandons = isTick
+        ? dataset.filter(r => portfolioDecisions[r.name] === 'ABANDON').length
+        : 0;
       const subText = isTick
-        ? dataset.length + ' strategies back-tested on real ticks (top KEEP strategies from the M1 analysis)'
+        ? dataset.length + ' strategies back-tested on real ticks (top ranked from the M1 analysis)'
+          + (tickAbandons ? ' — ' + tickAbandons + ' flagged as correlated' : '')
         : dataset.length + ' strategies ranked by multi-metric composite score';
       const tableId = isTick ? 'tickRankingTable' : 'm1RankingTable';
       container.innerHTML = '<div class="section-sub">' + subText + '</div><div id="' + tableId + '"></div>';
 
       const rows = dataset.map(r => {
-        const hasOv = !!DATA.overviews[r.name];
+        const hasOv = !!overviewFor(r.name, isTick);
         const hasCode = !!DATA.strategy_codes[r.name];
         const ovBtn = hasOv
           ? `<button class="analyze-btn ov-btn" data-name="${r.name}" data-action="overview">Overview</button>`
@@ -3916,7 +3547,7 @@ JS_BLOCK = r"""
           : '';
 
         let nameDisplay = r.name;
-        if (!isTick && portfolioDecisions[r.name] === 'ABANDON') {
+        if (isTick && portfolioDecisions[r.name] === 'ABANDON') {
           const abandonReason = portfolioReasons[r.name] || '';
           nameDisplay = `<span class="abandon-name">${r.name}</span> <span class="tag tag-abandon" title="${abandonReason.replace(/"/g, '&quot;')}" style="font-size:10px;padding:1px 6px;vertical-align:middle;cursor:help;">✗ ABANDON</span>`;
         }
@@ -3929,7 +3560,7 @@ JS_BLOCK = r"""
           `<div class="btn-group">${ovBtn}${codeBtn}${chartBtn}${exportBtn}</div>`
         ];
         row._tier = r.rank <= 5 ? 'tier-1' : r.rank <= 10 ? 'tier-2' : r.rank <= 25 ? 'tier-3' : '';
-        if (!isTick && portfolioDecisions[r.name] === 'ABANDON') row._abandon = true;
+        if (isTick && portfolioDecisions[r.name] === 'ABANDON') row._abandon = true;
         return row;
       });
       renderSortableTable('#' + tableId, headers, rows, {defaultSort: 0, defaultDir: 'asc'});
@@ -3961,7 +3592,7 @@ JS_BLOCK = r"""
       if (action === 'overview') {
         if (activeSideStrategy === name + '_ov') { closeSidePanel(); return; }
         activeSideStrategy = name + '_ov';
-        openOverviewPanel(name);
+        openOverviewPanel(name, inTick);
       } else if (action === 'code') {
         if (activeSideStrategy === name + '_code') { closeSidePanel(); return; }
         openCodePanel(name);
@@ -4013,10 +3644,15 @@ JS_BLOCK = r"""
     renderSortableTable('#mcFailedTable', headers, rows, {defaultSort: 4, defaultDir: 'desc'});
   })();
 
-  // === Portfolio Panel ===
+  // === Portfolio Panel (tick correlation clusters) ===
   (function buildPortfolio() {
     const el = $('#panel-portfolio');
-    el.innerHTML = '<div class="section-header">Portfolio Selection</div><div class="section-sub">Best composite score from each correlation cluster</div><div id="portfolioTable"></div>';
+    if (!DATA.portfolio || !DATA.portfolio.length) {
+      el.innerHTML = '<div class="section-header">Portfolio Selection</div>' +
+        '<div class="section-sub">No tick correlation results yet — run the "Monte Carlo Analysis - Tick" steps, then this tab will populate.</div>';
+      return;
+    }
+    el.innerHTML = '<div class="section-header">Portfolio Selection — Tick</div><div class="section-sub">Best tick composite score from each correlation cluster (correlation computed on the tick backtest trades)</div><div id="portfolioTable"></div>';
 
     const headers = [
       {label:'Strategy', text:true}, {label:'Decision', rawHtml:true}, {label:'Cluster'},
@@ -4029,7 +3665,9 @@ JS_BLOCK = r"""
         ? '<span class="tag tag-keep">✓ KEEP</span>'
         : '<span class="tag tag-abandon">✗ ABANDON</span>';
       const dirCls = p.direction === 'Long Only' ? 'tag-long' : p.direction === 'Short Only' ? 'tag-short' : 'tag-both';
-      const hasOv = !!DATA.overviews[p.name];
+      // The Portfolio tab is built entirely from the tick correlation pass, so its
+      // Overview / Export buttons must serve tick data.
+      const hasOv = !!overviewFor(p.name, true);
       const hasCode = !!DATA.strategy_codes[p.name];
       const ovBtn = hasOv
         ? `<button class="analyze-btn ov-btn" data-name="${p.name}" data-action="overview">Overview</button>`
@@ -4060,7 +3698,7 @@ JS_BLOCK = r"""
       if (action === 'overview') {
         if (activeSideStrategy === name + '_ov') { closeSidePanel(); return; }
         activeSideStrategy = name + '_ov';
-        openOverviewPanel(name);
+        openOverviewPanel(name, true);
       } else if (action === 'code') {
         if (activeSideStrategy === name + '_code') { closeSidePanel(); return; }
         openCodePanel(name);
@@ -4074,19 +3712,26 @@ JS_BLOCK = r"""
         ];
         openSidePanel(name, btn.dataset.chart, stats);
       } else if (action === 'export') {
-        exportStrategy(name);
+        exportStrategy(name, true);
       }
     });
   })();
 
-  // === Correlation Panel ===
+  // === Correlation Panel (tick backtest trades) ===
   (function buildCorrelation() {
     const el = $('#panel-correlation');
     let currentFreq = 'weekly';
+    const corrNames = DATA.corr_names || [];
+
+    if (!corrNames.length || !DATA.correlations || !(DATA.correlations.weekly || []).length) {
+      el.innerHTML = '<div class="section-header">Correlation Matrix</div>' +
+        '<div class="section-sub">No tick correlation results yet — run the "Monte Carlo Analysis - Tick" steps, then this tab will populate.</div>';
+      return;
+    }
 
     function render() {
       const matrix = DATA.correlations[currentFreq];
-      const names = DATA.names;
+      const names = corrNames;
       const n = names.length;
 
       // Truncate names for headers
@@ -4095,7 +3740,8 @@ JS_BLOCK = r"""
         return parts.length > 3 ? parts.slice(-2).join('.') : nm;
       });
 
-      let html = '<div class="section-header">Correlation Matrix</div>';
+      let html = '<div class="section-header">Correlation Matrix — Tick</div>';
+      html += '<div class="section-sub">P&L correlation between the tick back-tested strategies</div>';
       html += '<div class="heatmap-controls">';
       ['daily','weekly','monthly'].forEach(f => {
         html += `<button class="hm-btn${f===currentFreq?' active':''}" data-freq="${f}">${f.charAt(0).toUpperCase()+f.slice(1)}</button>`;
@@ -4142,35 +3788,19 @@ JS_BLOCK = r"""
     render();
   })();
 
-  // === Overlap Panel ===
-  (function buildOverlap() {
-    const el = $('#panel-overlap');
-    el.innerHTML = '<div class="section-header">Trade Overlap Analysis</div><div class="section-sub">Pairwise time-in-market overlap between strategies</div><div id="overlapTable"></div>';
-
-    const headers = [
-      {label:'Pair', text:true}, {label:'Overlapping'}, {label:'Overlap %'},
-      {label:'Same Dir'}, {label:'Opp Dir'}, {label:'Assessment', rawHtml:true}
-    ];
-    const rows = DATA.overlap.map(o => {
-      let tag, color;
-      if (o.pct >= 80) { tag = 'Very High'; color = 'var(--red)'; }
-      else if (o.pct >= 60) { tag = 'High'; color = 'var(--amber)'; }
-      else if (o.pct >= 40) { tag = 'Moderate'; color = 'var(--text-secondary)'; }
-      else { tag = 'Low — Good'; color = 'var(--green)'; }
-      return [o.pair, `${o.overlaps}/${o.total}`, o.pct + '%', o.same, o.opp,
-              `<span style="color:${color};font-weight:500">${tag}</span>`];
-    });
-    renderSortableTable('#overlapTable', headers, rows, {defaultSort: 2, defaultDir: 'desc'});
-  })();
-
-  // === Clusters Panel ===
+  // === Clusters Panel (tick correlation clusters) ===
   (function buildClusters() {
     const el = $('#panel-clusters');
+    if (!DATA.clusters || !DATA.clusters.length) {
+      el.innerHTML = '<div class="section-header">Correlation Clusters</div>' +
+        '<div class="section-sub">No tick correlation results yet — run the "Monte Carlo Analysis - Tick" steps, then this tab will populate.</div>';
+      return;
+    }
     const bestInCluster = {};
     DATA.portfolio.filter(p => p.decision === 'KEEP').forEach(p => { bestInCluster[p.cluster] = p.name; });
 
-    let html = '<div class="section-header">Correlation Clusters</div>';
-    html += `<div class="section-sub">${DATA.clusters.length} independent clusters identified — pick the best performer from each</div>`;
+    let html = '<div class="section-header">Correlation Clusters — Tick</div>';
+    html += `<div class="section-sub">${DATA.clusters.length} independent clusters identified across the tick back-tested strategies — pick the best performer from each</div>`;
     html += '<div class="cluster-grid">';
     DATA.clusters.forEach(cl => {
       const best = bestInCluster[cl.id] || '';
@@ -4192,67 +3822,8 @@ JS_BLOCK = r"""
     el.innerHTML = html;
 
     const bpHeaders = [{label:'#'}, {label:'Pair', text:true}, {label:'Weekly Corr'}, {label:'Daily Corr'}];
-    const bpRows = DATA.best_pairs.slice(0, 20).map((p, i) => [i+1, p.pair, p.weekly, p.daily]);
+    const bpRows = (DATA.best_pairs || []).slice(0, 20).map((p, i) => [i+1, p.pair, p.weekly, p.daily]);
     renderSortableTable('#bestPairsTable', bpHeaders, bpRows, {defaultSort: 0, defaultDir: 'asc'});
-  })();
-
-  // === Drawdowns Panel ===
-  (function buildDrawdowns() {
-    const el = $('#panel-drawdowns');
-    el.innerHTML = '<div class="section-header">Max Drawdown Periods</div><div class="section-sub">Worst drawdown period for each strategy</div><div id="ddTable"></div>';
-
-    const headers = [
-      {label:'Strategy', text:true}, {label:'Max DD ($)'}, {label:'DD Start', text:true},
-      {label:'DD End', text:true}, {label:'Duration (days)'},
-      {label:'Analyze', noSort:true, rawHtml:true}
-    ];
-    const rows = DATA.drawdowns.map(d => {
-      const s = DATA.summary.find(x => x.name === d.name);
-      const hasOv = !!DATA.overviews[d.name];
-      const hasCode = !!DATA.strategy_codes[d.name];
-      const ovBtn = hasOv
-        ? `<button class="analyze-btn ov-btn" data-name="${d.name}" data-action="overview">Overview</button>`
-        : `<button class="analyze-btn ov-btn disabled">Overview</button>`;
-      const codeBtn = hasCode
-        ? `<button class="analyze-btn code-btn" data-name="${d.name}" data-action="code">Strategy</button>`
-        : `<button class="analyze-btn code-btn disabled">Strategy</button>`;
-      const chartBtn = s && s.chart
-        ? `<button class="analyze-btn chart-btn" data-name="${d.name}" data-chart="${s.chart}" data-action="chart">Chart</button>`
-        : `<button class="analyze-btn chart-btn disabled">Chart</button>`;
-      const exportBtn = `<button class="analyze-btn export-btn" data-name="${d.name}" data-action="export">Export</button>`;
-      return [d.name, '$' + d.max_dd.toLocaleString(undefined,{minimumFractionDigits:2}), d.dd_start, d.dd_end, d.dd_days,
-        `<div class="btn-group">${ovBtn}${codeBtn}${chartBtn}${exportBtn}</div>`];
-    });
-    renderSortableTable('#ddTable', headers, rows, {defaultSort: 1, defaultDir: 'asc'});
-
-    el.addEventListener('click', e => {
-      const btn = e.target.closest('.analyze-btn:not(.disabled)');
-      if (!btn) return;
-      const name = btn.dataset.name;
-      const action = btn.dataset.action;
-
-      if (action === 'overview') {
-        if (activeSideStrategy === name + '_ov') { closeSidePanel(); return; }
-        activeSideStrategy = name + '_ov';
-        openOverviewPanel(name);
-      } else if (action === 'code') {
-        if (activeSideStrategy === name + '_code') { closeSidePanel(); return; }
-        openCodePanel(name);
-      } else if (action === 'chart') {
-        if (activeSideStrategy === name) { closeSidePanel(); return; }
-        const d = DATA.drawdowns.find(x => x.name === name);
-        const s = DATA.summary.find(x => x.name === name);
-        const stats = [
-          ['Max Drawdown', '$' + d.max_dd.toLocaleString()],
-          ['DD Start', d.dd_start], ['DD End', d.dd_end],
-          ['Duration', d.dd_days + ' days'],
-          ['Total P&L', '$' + (s ? s.total_pnl.toLocaleString() : '—')],
-        ];
-        openSidePanel(name, btn.dataset.chart, stats);
-      } else if (action === 'export') {
-        exportStrategy(name);
-      }
-    });
   })();
 
   // === Methodology Panel ===
@@ -4412,7 +3983,7 @@ def main():
     start_datetime = datetime.now()
 
     print(f"\n{Colors.CYAN}{'=' * 60}{Colors.RESET}")
-    print(f"{Colors.CYAN}Strategy Correlation Analysis{Colors.RESET}")
+    print(f"{Colors.CYAN}Strategy Ranking Analysis{Colors.RESET}")
     print(f"{Colors.CYAN}{'=' * 60}{Colors.RESET}")
     print()
     print(f"{Colors.CYAN}Started:{Colors.RESET} {Colors.GREEN}{start_datetime.strftime('%Y-%m-%d %H:%M:%S')}{Colors.RESET}")
@@ -4471,20 +4042,10 @@ def main():
             print("  Check that trade CSV names match BatchMC_Results.csv strategy names.")
             sys.exit(1)
         
-        if len(filtered) == 1:
-            print(f"\n{Colors.YELLOW}WARNING: Only 1 strategy matched MC results - skipping correlation analysis.{Colors.RESET}")
-            skip_correlation = True
-        else:
-            skip_correlation = False
-
         print(f"\n  {len(filtered)}/{len(strategies)} strategies matched MC pass list")
         strategies = filtered
     else:
-        # No MC filter - check if we have enough strategies for correlation
-        skip_correlation = len(strategies) < 2
-        if skip_correlation and len(strategies) == 1:
-            print(f"\n{Colors.YELLOW}WARNING: Only 1 strategy found - skipping correlation analysis.{Colors.RESET}")
-        elif len(strategies) == 0:
+        if len(strategies) == 0:
             print(f"ERROR: No strategies found to analyse.")
             sys.exit(1)
 
@@ -4495,57 +4056,15 @@ def main():
     print("Computing strategy statistics...")
     stats = compute_strategy_stats(strategies)
 
-    # Initialize correlation and overlap data structures
-    corr_daily = pd.DataFrame()
-    corr_weekly = pd.DataFrame()
-    corr_monthly = pd.DataFrame()
-    overlap_data = {}
-    clusters = [[name] for name in names]  # Each strategy in its own cluster by default
-
-    if not skip_correlation:
-        print("Computing P&L correlations (daily, weekly, monthly)...")
-        print("  (excluding periods where both strategies had no activity)")
-        daily_df = build_pnl_series(strategies, 'D')
-        weekly_df = build_pnl_series(strategies, 'W')
-        monthly_df = build_pnl_series(strategies, 'M')
-        corr_daily = compute_pairwise_correlation(daily_df)
-        corr_weekly = compute_pairwise_correlation(weekly_df)
-        corr_monthly = compute_pairwise_correlation(monthly_df, min_observations=6)
-
-        print("Computing pairwise trade overlap (this may take a while for many strategies)...")
-        total_pairs = n * (n - 1) // 2
-        pair_count = 0
-        for i, n1 in enumerate(names):
-            for j in range(i + 1, len(names)):
-                n2 = names[j]
-                pair_count += 1
-                print(f"  [{pair_count}/{total_pairs}] {n1} vs {n2}...", end='', flush=True)
-                overlaps, same, opp = compute_trade_overlap(strategies[n1], strategies[n2])
-                total1 = len(strategies[n1])
-                pct = overlaps / total1 if total1 > 0 else 0
-                overlap_data[(n1, n2)] = {
-                    'overlaps': overlaps, 'total': total1,
-                    'pct': pct, 'same': same, 'opp': opp
-                }
-                print(f" {pct:.1%}")
-
-        print("\nIdentifying correlation clusters...")
-        clusters = identify_clusters(names, corr_weekly, threshold=0.5)
-        for i, cluster in enumerate(clusters):
-            print(f"  Cluster {i + 1}: {', '.join(cluster)}")
-    else:
-        print(f"{Colors.YELLOW}Skipping correlation analysis (need at least 2 strategies){Colors.RESET}")
-        # Create placeholder 1x1 correlation matrices for single strategy
-        if n == 1:
-            corr_daily = pd.DataFrame([[1.0]], index=names, columns=names)
-            corr_weekly = pd.DataFrame([[1.0]], index=names, columns=names)
-            corr_monthly = pd.DataFrame([[1.0]], index=names, columns=names)
+    # NOTE: correlation / cluster / KEEP-ABANDON analysis no longer runs on the
+    # M1 pass. It is performed on the tick backtest results instead
+    # (Step8_Update_Dashboard_Tick.py), where far fewer strategies survive and
+    # the trade data reflects the model actually traded.
 
     print("\nGenerating Excel report + HTML dashboard...")
-    output_path, keep, abandon, strategy_scores = generate_report(
+    output_path, strategy_scores = generate_report(
         folder_path, strategies, stats, names,
-        corr_daily, corr_weekly, corr_monthly,
-        overlap_data, clusters, mt5_folder=mt5_folder,
+        mt5_folder=mt5_folder,
         mc95_data=mc95_data, mc_failed=mc_failed,
         mc_rank_data=mc_rank_data,
     )
@@ -4555,54 +4074,22 @@ def main():
     print(f"  {output_path}")
     print(f"{Colors.CYAN}{'=' * 60}{Colors.RESET}")
 
-    selection_method = 'composite score' if strategy_scores else 'P&L'
     print(f"\n{Colors.CYAN}Quick Summary:{Colors.RESET}")
     print(f"  Strategies analysed: {n}")
     if mc_results_path:
         print(f"  MC95 Ret/DD threshold: >= {mc95_threshold}")
-    
-    if not skip_correlation:
-        print(f"  Correlation clusters: {len(clusters)}")
-        print(f"  Suggested portfolio size: ~{len(clusters)} strategies (1 per cluster)")
-    else:
-        print(f"  Correlation analysis: {Colors.YELLOW}SKIPPED (insufficient strategies){Colors.RESET}")
-    
-    print(f"  Selection method: {selection_method}")
+    print(f"  Ranked by: composite score" if strategy_scores else "  Ranked by: P&L (no MT5 reports found)")
+    print(f"  Correlation check: run later on the tick backtest results (Step 8)")
 
-    print(f"\n  + KEEP ({len(keep)}):")
-    for s in sorted(keep.keys(), key=lambda x: keep[x]):
-        csize = len(clusters[keep[s] - 1]) if keep[s] - 1 < len(clusters) else 1
-        score_tag = f'  [Score: {strategy_scores[s]:.3f}]' if strategy_scores and s in strategy_scores else ''
-        tag = '' if csize == 1 else f' (best of {csize} in cluster)'
-        mc_tag = ''
-        matched = match_csv_to_mc(s, set(mc95_data.keys()))
-        if matched and matched in mc95_data:
-            mc_tag = f'  [MC95 Ret/DD: {mc95_data[matched]["mc95_ret_dd"]:.2f}]'
-        if skip_correlation:
-            print(f"    {s} - ${stats[s]['total_pnl']:,.0f}{score_tag}{mc_tag}")
-        else:
-            print(f"    Cluster {keep[s]}: {s} - ${stats[s]['total_pnl']:,.0f}{tag}{score_tag}{mc_tag}")
-
-    if abandon:
-        print(f"\n  x ABANDON ({len(abandon)}):")
-        for s in sorted(abandon.keys(), key=lambda x: abandon[x][0]):
-            cid, replaced = abandon[s]
-            score_tag = f'  [Score: {strategy_scores[s]:.3f}]' if strategy_scores and s in strategy_scores else ''
-            print(f"    Cluster {cid}: {s} - redundant with {replaced}{score_tag}")
-
-    if not skip_correlation:
-        high_corr_pairs = []
-        for i, n1 in enumerate(names):
-            for j in range(i + 1, len(names)):
-                n2 = names[j]
-                wc = corr_weekly.loc[n1, n2]
-                if abs(wc) >= CORR_HIGH:
-                    high_corr_pairs.append((n1, n2, wc))
-        if high_corr_pairs:
-            high_corr_pairs.sort(key=lambda x: abs(x[2]), reverse=True)
-            print(f"\n  ! High correlation pairs (weekly >= {CORR_HIGH}):")
-            for n1, n2, wc in high_corr_pairs[:10]:
-                print(f"    {n1} vs {n2}: {wc:.3f}")
+    if strategy_scores:
+        top_n = sorted(strategy_scores.items(), key=lambda kv: kv[1], reverse=True)[:10]
+        print(f"\n  Top {len(top_n)} by composite score:")
+        for rank, (s, score) in enumerate(top_n, 1):
+            mc_tag = ''
+            matched = match_csv_to_mc(s, set(mc95_data.keys()))
+            if matched and matched in mc95_data:
+                mc_tag = f'  [MC95 Ret/DD: {mc95_data[matched]["mc95_ret_dd"]:.2f}]'
+            print(f"    #{rank:2d}  {s} - ${stats[s]['total_pnl']:,.0f}  [Score: {score:.3f}]{mc_tag}")
 
     # Record end time
     end_datetime = datetime.now()
