@@ -1126,6 +1126,23 @@ class LogPanel(QWidget):
     COLOR_DEFAULT = "#e6edf3"
     COLOR_DIM = "#8b949e"
 
+    # ANSI SGR handling — the Step*.py scripts colorise their stdout with escape
+    # codes; translate them to HTML instead of dumping them as literal text.
+    _ANSI_SGR_RE = re.compile(r'\x1b\[([0-9;]*)m')
+    # Any other escape sequence (cursor moves, erase-line, OSC titles) is dropped.
+    _ANSI_OTHER_RE = re.compile(r'\x1b(?:\[[0-9;?]*[a-ln-zA-LN-Z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])')
+
+    ANSI_COLORS = {
+        30: "#6e7681", 90: "#8b949e",   # black / bright black -> dim gray
+        31: "#f85149", 91: "#ff7b72",   # red
+        32: "#3fb950", 92: "#56d364",   # green
+        33: "#d29922", 93: "#f59e0b",   # yellow
+        34: "#58a6ff", 94: "#79c0ff",   # blue
+        35: "#bc8cff", 95: "#d2a8ff",   # magenta
+        36: "#39c5cf", 96: "#56d4dd",   # cyan
+        37: "#e6edf3", 97: "#ffffff",   # white
+    }
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._build_ui()
@@ -1194,10 +1211,57 @@ class LogPanel(QWidget):
         """Escape HTML special characters."""
         return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
+    def _ansi_to_html(self, text: str) -> str:
+        """Convert ANSI SGR escape sequences into styled HTML spans."""
+        parts: list[str] = []
+        state = {"color": None, "bold": False}
+        pos = 0
+
+        def emit(chunk: str):
+            if not chunk:
+                return
+            escaped = self._html_escape(chunk)
+            styles = []
+            if state["color"]:
+                styles.append(f"color: {state['color']}")
+            if state["bold"]:
+                styles.append("font-weight: bold")
+            if styles:
+                parts.append(f'<span style="{"; ".join(styles)};">{escaped}</span>')
+            else:
+                parts.append(escaped)
+
+        for match in self._ANSI_SGR_RE.finditer(text):
+            emit(text[pos:match.start()])
+            pos = match.end()
+            for raw in (match.group(1) or "0").split(";"):
+                code = int(raw) if raw.isdigit() else 0
+                if code == 0:
+                    state["color"], state["bold"] = None, False
+                elif code == 1:
+                    state["bold"] = True
+                elif code == 22:
+                    state["bold"] = False
+                elif code == 39:
+                    state["color"] = None
+                elif code in self.ANSI_COLORS:
+                    state["color"] = self.ANSI_COLORS[code]
+
+        emit(text[pos:])
+        return "".join(parts)
+
     def _format_line(self, text: str) -> str:
         """Format a line of text with appropriate colors based on content."""
+        # Drop non-colour escape sequences and stray carriage returns first
+        text = self._ANSI_OTHER_RE.sub("", text).replace("\r", "")
+
+        # If the script already told us the colour via ANSI codes, honour it
+        # rather than second-guessing with the keyword heuristics below.
+        if "\x1b[" in text:
+            return self._ansi_to_html(text)
+
         escaped = self._html_escape(text)
-        
+
         # Check for error patterns (case-insensitive)
         text_lower = text.lower()
         

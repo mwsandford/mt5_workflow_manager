@@ -18,7 +18,14 @@
       "Bash(tasklist /v)",
       "Bash(python3 *)",
       "Read(//e/Trading/**)",
-      "WebFetch(domain:www.metatrader5.com)"
+      "WebFetch(domain:www.metatrader5.com)",
+      "Bash(mkdir -p C:/Users/msand/AppData/Local/Temp/claude/E--Trading-MT5-Workflow-Manager/977b0df5-cb58-454a-a65e-cfd4d7e59bca/scratchpad/excluded_16.1.285)",
+      "Bash(mv C:/Users/msand/AppData/Local/Temp/claude/E--Trading-MT5-Workflow-Manager/977b0df5-cb58-454a-a65e-cfd4d7e59bca/scratchpad/recon_run/*16.1.285* C:/Users/msand/AppData/Local/Temp/claude/E--Trading-MT5-Workflow-Manager/977b0df5-cb58-454a-a65e-cfd4d7e59bca/scratchpad/excluded_16.1.285/)",
+      "Bash(mkdir -p 'E:/Trading/SQ_Strategies/Test Account 03/2026-07-26/_Exports')",
+      "Bash(cp C:/Users/msand/AppData/Local/Temp/claude/E--Trading-MT5-Workflow-Manager/977b0df5-cb58-454a-a65e-cfd4d7e59bca/scratchpad/exports/*.json 'E:/Trading/SQ_Strategies/Test Account 03/2026-07-26/_Exports/')",
+      "Bash(node test_export_js.js)",
+      "Bash(node test_overview_panel.js)",
+      "Bash(grep *)"
     ]
   }
 }
