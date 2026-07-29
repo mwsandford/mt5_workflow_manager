@@ -25,7 +25,9 @@
       "Bash(cp C:/Users/msand/AppData/Local/Temp/claude/E--Trading-MT5-Workflow-Manager/977b0df5-cb58-454a-a65e-cfd4d7e59bca/scratchpad/exports/*.json 'E:/Trading/SQ_Strategies/Test Account 03/2026-07-26/_Exports/')",
       "Bash(node test_export_js.js)",
       "Bash(node test_overview_panel.js)",
-      "Bash(grep *)"
+      "Bash(grep *)",
+      "Read(//c/Users/msand/.mt5_workflow/**)",
+      "PowerShell(Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { \"{0} Primary={1} Bounds={2} Working={3}\" -f $_.DeviceName, $_.Primary, $_.Bounds, $_.WorkingArea }; \"VirtualScreen: \" + [System.Windows.Forms.SystemInformation]::VirtualScreen)"
     ]
   }
 }

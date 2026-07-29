@@ -32,8 +32,8 @@ from PySide6.QtWidgets import (
     QSplitter, QGroupBox, QGridLayout, QFileDialog, QSizePolicy,
     QMessageBox, QDateEdit, QCheckBox
 )
-from PySide6.QtCore import Qt, Signal, QDate
-from PySide6.QtGui import QFont, QTextCursor
+from PySide6.QtCore import Qt, Signal, QDate, QRect
+from PySide6.QtGui import QFont, QTextCursor, QGuiApplication
 
 
 # ─────────────────────────────────────────────
@@ -1444,6 +1444,45 @@ class WorkflowWindow(QMainWindow):
         except Exception as e:
             print(f"Warning: Could not save UI state: {e}")
 
+    def _sanitise_geometry(self, x: int, y: int, w: int, h: int) -> QRect:
+        """Clamp a saved geometry so it always lands on a currently-connected screen.
+
+        The saved position may come from a monitor that is no longer attached
+        (e.g. a docked setup), which would otherwise place the window entirely
+        off the virtual desktop — visible in the taskbar but unreachable.
+        """
+        screens = QGuiApplication.screens()
+        if not screens:
+            return QRect(x, y, w, h)
+
+        saved = QRect(x, y, w, h)
+
+        # Prefer the screen the saved rect overlaps most; fall back to primary.
+        target = QGuiApplication.primaryScreen()
+        best_overlap = 0
+        for screen in screens:
+            inter = screen.availableGeometry().intersected(saved)
+            overlap = inter.width() * inter.height()
+            if overlap > best_overlap:
+                best_overlap, target = overlap, screen
+
+        available = target.availableGeometry()
+
+        # Never larger than the screen it will sit on, and never below the minimum.
+        w = max(self.minimumWidth(), min(w, available.width()))
+        h = max(self.minimumHeight(), min(h, available.height()))
+
+        # If less than a title bar's worth of the window is on-screen, recentre.
+        visible = available.intersected(QRect(x, y, w, h))
+        if visible.width() < 200 or visible.height() < 60:
+            x = available.x() + max(0, (available.width() - w) // 2)
+            y = available.y() + max(0, (available.height() - h) // 2)
+        else:
+            x = min(max(x, available.x()), available.right() - w + 1)
+            y = min(max(y, available.y()), available.bottom() - h + 1)
+
+        return QRect(x, y, w, h)
+
     def _load_ui_state(self):
         """Load window geometry and splitter position."""
         if not self._ui_config_path.exists():
@@ -1456,10 +1495,14 @@ class WorkflowWindow(QMainWindow):
             if state.get("window_maximized"):
                 self.showMaximized()
             else:
-                if "window_x" in state and "window_y" in state:
-                    self.move(state["window_x"], state["window_y"])
-                if "window_width" in state and "window_height" in state:
-                    self.resize(state["window_width"], state["window_height"])
+                rect = self._sanitise_geometry(
+                    state.get("window_x", self.x()),
+                    state.get("window_y", self.y()),
+                    state.get("window_width", self.width()),
+                    state.get("window_height", self.height()),
+                )
+                self.resize(rect.width(), rect.height())
+                self.move(rect.x(), rect.y())
 
             # Restore splitter sizes
             if "splitter_sizes" in state:
