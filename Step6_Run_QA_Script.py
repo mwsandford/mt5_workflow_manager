@@ -168,114 +168,267 @@ def get_templates_folder():
     return os.path.join(script_dir, "qa_templates")
 
 
-def force_foreground(main_window):
-    """Force a window to the foreground, bypassing Windows focus-stealing protection.
+# Win32 constants for window activation
+SW_MINIMIZE = 6
+SW_RESTORE = 9
+SW_SHOW = 5
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_SHOWWINDOW = 0x0040
+VK_MENU = 0x12
+KEYEVENTF_KEYUP = 0x0002
 
-    Plain SetForegroundWindow is unreliable because Windows blocks focus changes
-    unless the calling thread is already foreground. This matters for Java Swing
-    apps like Quant Analyzer where another app may be covering the window.
+
+def force_foreground(main_window, attempts: int = 5, quiet: bool = False) -> bool:
+    """Force a window to the foreground and VERIFY it actually got there.
+
+    Windows blocks SetForegroundWindow unless the calling thread already owns the
+    foreground or received the last input. A bare SetForegroundWindow just flashes
+    the taskbar button and returns. The reliable route is AttachThreadInput: attach
+    our input queue to both the current foreground thread and the target thread,
+    which makes Windows treat us as entitled to change activation.
+
+    This matters because Quant Analyzer is a Java Swing app launched from a
+    background subprocess — it opens BEHIND whatever the user is working in, and
+    pyautogui screenshots capture the composited desktop. If QA is not on top,
+    the templates can never be found no matter how good they are.
+
+    Returns True if the window is confirmed foreground, False otherwise.
     """
-    import pyautogui
     try:
         hwnd = main_window.handle
     except Exception:
         hwnd = None
 
-    user32 = ctypes.windll.user32
-    SW_RESTORE = 9
+    if not hwnd:
+        return False
 
-    if hwnd:
-        # Restore if minimized
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    cur_tid = kernel32.GetCurrentThreadId()
+
+    for attempt in range(attempts):
         try:
             if user32.IsIconic(hwnd):
                 user32.ShowWindow(hwnd, SW_RESTORE)
-        except Exception:
-            pass
+                time.sleep(0.3)
+            user32.ShowWindow(hwnd, SW_SHOW)
 
-        # Dummy ALT press unlocks Windows' foreground restriction for this thread
+            fg = user32.GetForegroundWindow()
+            fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+            tgt_tid = user32.GetWindowThreadProcessId(hwnd, None)
+
+            attached = []
+            for tid in {fg_tid, tgt_tid}:
+                if tid and tid != cur_tid and user32.AttachThreadInput(cur_tid, tid, True):
+                    attached.append(tid)
+            try:
+                # Synthetic ALT tap marks this thread as having received input,
+                # which relaxes the foreground lock for the calls that follow.
+                user32.keybd_event(VK_MENU, 0, 0, 0)
+                user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+
+                flags = SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+                user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags)
+                user32.SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+                user32.BringWindowToTop(hwnd)
+                user32.SetForegroundWindow(hwnd)
+                user32.SetActiveWindow(hwnd)
+                user32.SetFocus(hwnd)
+            finally:
+                for tid in attached:
+                    user32.AttachThreadInput(cur_tid, tid, False)
+
+            time.sleep(0.4)
+            if user32.GetForegroundWindow() == hwnd:
+                if not quiet:
+                    print(f"  {Colors.GREEN}Window raised to foreground (attempt {attempt + 1}){Colors.RESET}")
+                return True
+
+            # Last resort: a real minimize/restore cycle forces genuine activation
+            if attempt >= 1:
+                user32.ShowWindow(hwnd, SW_MINIMIZE)
+                time.sleep(0.25)
+                user32.ShowWindow(hwnd, SW_RESTORE)
+                time.sleep(0.5)
+                if user32.GetForegroundWindow() == hwnd:
+                    if not quiet:
+                        print(f"  {Colors.GREEN}Window raised via minimize/restore (attempt {attempt + 1}){Colors.RESET}")
+                    return True
+        except Exception as e:
+            if not quiet:
+                print(f"  {Colors.YELLOW}Raise attempt {attempt + 1} error: {e}{Colors.RESET}")
+
+        # pywinauto's own focus call as a supplementary nudge before retrying
         try:
-            pyautogui.keyDown('alt')
-            pyautogui.keyUp('alt')
+            main_window.set_focus()
+            time.sleep(0.3)
+            if user32.GetForegroundWindow() == hwnd:
+                if not quiet:
+                    print(f"  {Colors.GREEN}Window raised via pywinauto set_focus{Colors.RESET}")
+                return True
         except Exception:
             pass
 
-        try:
-            user32.SetForegroundWindow(hwnd)
-            user32.BringWindowToTop(hwnd)
-            user32.SetActiveWindow(hwnd)
-        except Exception:
-            pass
+    if not quiet:
+        print(f"  {Colors.RED}Could not bring window to the foreground after {attempts} attempts{Colors.RESET}")
+    return False
 
-    # pywinauto handles AttachThreadInput internally as a last resort
+
+def describe_foreground() -> str:
+    """Return 'title' (pid N) for whatever window is currently on top — for diagnostics."""
+    user32 = ctypes.windll.user32
     try:
-        main_window.set_focus()
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return "<none>"
+        buf = ctypes.create_unicode_buffer(512)
+        user32.GetWindowTextW(hwnd, buf, 512)
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return f"{buf.value!r} (pid {pid.value})"
     except Exception:
-        pass
-
-    time.sleep(0.3)
+        return "<unknown>"
 
 
-def find_and_click(template_name: str, confidence: float = 0.8, timeout: int = 10, double: bool = False):
+def save_debug_screenshot(tag: str, output_folder: str | None) -> str | None:
+    """Dump a full-screen capture so a failed match can be diagnosed after the fact."""
+    import pyautogui
+    try:
+        folder = output_folder if output_folder and os.path.isdir(output_folder) else get_templates_folder()
+        path = os.path.join(folder, f"qa_debug_{tag}_{datetime.now():%Y%m%d_%H%M%S}.png")
+        pyautogui.screenshot().save(path)
+        return path
+    except Exception:
+        return None
+
+
+def _best_match_confidence(template_path: str) -> float | None:
+    """Best template-match score anywhere on screen, ignoring any threshold.
+
+    Used purely for diagnostics: it distinguishes "the element is on screen but the
+    template no longer matches it well" (score near the threshold) from "the element
+    is not visible at all" (low score, usually because the window is not on top).
+    """
+    try:
+        import cv2
+        import numpy as np
+        import pyautogui
+        needle = cv2.imread(template_path, cv2.IMREAD_COLOR)
+        if needle is None:
+            return None
+        haystack = cv2.cvtColor(np.array(pyautogui.screenshot()), cv2.COLOR_RGB2BGR)
+        if needle.shape[0] > haystack.shape[0] or needle.shape[1] > haystack.shape[1]:
+            return None
+        result = cv2.matchTemplate(haystack, needle, cv2.TM_CCOEFF_NORMED)
+        return float(cv2.minMaxLoc(result)[1])
+    except Exception:
+        return None
+
+
+def find_and_click(template_name: str, confidence: float = 0.8, timeout: int = 10, double: bool = False,
+                   main_window=None):
     """Find a template image on screen and click it.
-    
+
     Args:
         template_name: Name of the template file (without path)
         confidence: Match confidence threshold (0-1)
         timeout: How long to search before giving up
         double: Whether to double-click
-        
+        main_window: Optional QA window — searched first (much faster than a
+            full 4K/ultrawide screen scan, and avoids false positives elsewhere)
+            and re-raised between retries if focus is lost.
+
     Returns:
         True if found and clicked, False otherwise
     """
     import pyautogui
     import time
-    
+
     templates_folder = get_templates_folder()
     template_path = os.path.join(templates_folder, template_name)
-    
+
     if not os.path.exists(template_path):
         raise FileNotFoundError(f"Template image not found: {template_path}")
-    
+
     print(f"  Searching for: {template_name}")
-    
+
+    def window_region():
+        if main_window is None:
+            return None
+        try:
+            r = main_window.rectangle()
+            w, h = r.right - r.left, r.bottom - r.top
+            if w > 0 and h > 0:
+                return (max(0, r.left), max(0, r.top), w, h)
+        except Exception:
+            pass
+        return None
+
     start_time = time.time()
     location = None
     screenshot_failed = False
-    
+    user32 = ctypes.windll.user32
+
     while time.time() - start_time < timeout:
-        try:
-            location = pyautogui.locateOnScreen(template_path, confidence=confidence)
-            if location:
-                break
-        except pyautogui.ImageNotFoundException:
-            # Image not found, keep trying
-            pass
-        except Exception as e:
-            # Screenshot or other error - may indicate RDP disconnect
-            if not screenshot_failed:
-                print(f"  {Colors.YELLOW}Warning: Screenshot issue - {e}{Colors.RESET}")
-                screenshot_failed = True
+        # Search the QA window first, then fall back to the whole desktop in case
+        # the element rendered in a detached popup outside the main frame.
+        for region in (window_region(), None):
+            try:
+                location = pyautogui.locateOnScreen(template_path, confidence=confidence, region=region)
+                if location:
+                    break
+            except pyautogui.ImageNotFoundException:
+                pass
+            except Exception as e:
+                if not screenshot_failed:
+                    print(f"  {Colors.YELLOW}Warning: Screenshot issue - {e}{Colors.RESET}")
+                    screenshot_failed = True
+        if location:
+            break
+
+        # Something may have stolen focus mid-run (notification, updater popup).
+        # Re-raise QA before the next sweep rather than burning the whole timeout
+        # screenshotting a desktop that does not show it.
+        if main_window is not None:
+            try:
+                if user32.GetForegroundWindow() != main_window.handle:
+                    force_foreground(main_window, attempts=2, quiet=True)
+            except Exception:
+                pass
+
         time.sleep(0.5)
-    
+
     if not location:
+        print(f"  {Colors.RED}Could not find {template_name} on screen{Colors.RESET}")
         if screenshot_failed:
-            print(f"  {Colors.RED}Could not find {template_name} - screenshot failed{Colors.RESET}")
-            print(f"  {Colors.YELLOW}TIP: RDP may be disconnected. Keep RDP minimized (not closed) for automation to work.{Colors.RESET}")
+            print(f"  {Colors.YELLOW}Screen capture itself failed — the desktop session may not be interactive.{Colors.RESET}")
         else:
-            print(f"  {Colors.RED}Could not find {template_name} on screen{Colors.RESET}")
+            best = _best_match_confidence(template_path)
+            if best is not None:
+                print(f"  Best match anywhere on screen: {best:.3f} (needed {confidence:.2f})")
+                if best < 0.5:
+                    print(f"  {Colors.YELLOW}That score is low enough that the element is almost certainly "
+                          f"not visible — i.e. the Quant Analyzer window is not on top.{Colors.RESET}")
+                else:
+                    print(f"  {Colors.YELLOW}The element looks present but has changed appearance — "
+                          f"re-run with --capture-templates to refresh the templates.{Colors.RESET}")
+            print(f"  Foreground window is currently: {describe_foreground()}")
         return False
-    
+
     # Get center of the found region
     center_x = location.left + location.width // 2
     center_y = location.top + location.height // 2
-    
+
     print(f"  Found at ({center_x}, {center_y})")
-    
+
     if double:
         pyautogui.doubleClick(center_x, center_y)
     else:
         pyautogui.click(center_x, center_y)
-    
+
     return True
 
 
@@ -334,15 +487,12 @@ def capture_templates(qa_path: str):
     # Get window position (QA opens at a fixed position/size — do NOT maximize)
     rect = main_window.rectangle()
 
-    # Bring to focus by clicking on the window title bar area
+    # Bring to focus — templates must be captured from the same on-top rendering
+    # the automation run will see
     print("Bringing window to front...")
-    try:
-        click_x = rect.left + (rect.right - rect.left) // 2
-        click_y = rect.top + 15  # Title bar area
-        pyautogui.click(click_x, click_y)
-        time.sleep(0.5)
-    except Exception as e:
-        print(f"{Colors.YELLOW}Warning: Could not bring window to front: {e}{Colors.RESET}")
+    if not force_foreground(main_window):
+        print(f"{Colors.YELLOW}Warning: Could not bring window to front. "
+              f"Click on the Quant Analyzer window manually before capturing.{Colors.RESET}")
 
     print(f"Window: {main_window.window_text()}")
     print()
@@ -968,12 +1118,20 @@ def run_qa_script(script_name: str, qa_path: str, keep_open: bool, timeout: int,
         pyautogui.FAILSAFE = False
         pyautogui.PAUSE = 0.5
 
-        # Bring QA to front (do NOT maximize — QA opens at a fixed position/size)
+        # Bring QA to front (do NOT maximize — QA opens at a fixed position/size).
+        # QA is launched from a background subprocess so it comes up BEHIND whatever
+        # the user is working in. Screenshots capture the composited desktop, so
+        # nothing can be located until this succeeds.
         print("  Bringing Quant Analyzer to front...")
-        try:
-            force_foreground(main_window)
-        except Exception as e:
-            print(f"  {Colors.YELLOW}Warning: Could not bring window to front: {e}{Colors.RESET}")
+        if not force_foreground(main_window):
+            print(f"  {Colors.YELLOW}Foreground window is: {describe_foreground()}{Colors.RESET}")
+            raise RuntimeError(
+                "Could not bring the Quant Analyzer window to the foreground.\n"
+                "Screen automation captures whatever is on top of the desktop, so nothing\n"
+                "can be located while another application is covering Quant Analyzer.\n"
+                f"Currently on top: {describe_foreground()}\n"
+                "Check for a full-screen or always-on-top window blocking activation."
+            )
 
         rect = main_window.rectangle()
         win_left = rect.left
@@ -1016,35 +1174,45 @@ def _run_script_with_images(script_name: str, main_window, keep_open: bool, time
         raise ValueError(f"No template defined for script: {script_name}. Expected 'minute' or 'tick' in name.")
     
     try:
-        # Bring window to front
+        # Bring window to front (already verified by the caller, but QA finishes
+        # loading asynchronously and may re-order its own windows)
         force_foreground(main_window)
 
         # Step 2: Click on Scripter in the left menu
         print("\nStep 2: Clicking on Scripter panel...")
-        if not find_and_click("scripter_icon.png", confidence=0.8, timeout=10):
+        if not find_and_click("scripter_icon.png", confidence=0.8, timeout=20, main_window=main_window):
+            shot = save_debug_screenshot("scripter", output_folder)
             raise RuntimeError(
-                "Could not find Scripter icon on screen.\n"
-                "This usually means RDP is disconnected and Windows can't capture screenshots.\n"
-                "Solutions:\n"
-                "  1. Keep RDP window MINIMIZED instead of closing it\n"
-                "  2. Use 'tscon' to disconnect without locking the session\n"
-                "  3. Install TightVNC for persistent desktop access"
+                "Could not find the Scripter icon on screen.\n"
+                "The Quant Analyzer window is on top, so this means the left menu did not\n"
+                "render as expected — QA may still be loading, or a dialog (update prompt,\n"
+                "licence notice) is covering the menu.\n"
+                + (f"A screenshot of what was on screen was saved to:\n  {shot}\n" if shot else "")
+                + "If the QA UI has changed, re-run this script with --capture-templates."
             )
         time.sleep(1)
-        
+
         # Step 3: Double-click on the script in the Navigator panel
         print(f"\nStep 3: Selecting script '{script_name}' from Navigator...")
         # Use higher confidence for scripts since they look similar
-        if not find_and_click(script_template, confidence=0.9, timeout=10, double=True):
-            raise RuntimeError(f"Could not find script {script_name} on screen")
+        if not find_and_click(script_template, confidence=0.9, timeout=20, double=True, main_window=main_window):
+            shot = save_debug_screenshot("script", output_folder)
+            raise RuntimeError(
+                f"Could not find script {script_name} on screen."
+                + (f"\nScreenshot saved to: {shot}" if shot else "")
+            )
         time.sleep(1)
-        
+
         # Step 4: Click the Run button
         print(f"\nStep 4: Clicking Run button...")
-        if not find_and_click("run_button.png", confidence=0.8, timeout=10):
-            raise RuntimeError("Could not find Run button on screen")
+        if not find_and_click("run_button.png", confidence=0.8, timeout=20, main_window=main_window):
+            shot = save_debug_screenshot("run", output_folder)
+            raise RuntimeError(
+                "Could not find the Run button on screen."
+                + (f"\nScreenshot saved to: {shot}" if shot else "")
+            )
         time.sleep(1)
-        
+
         # Step 5: Wait for completion
         print(f"\nStep 5: Waiting for script completion (timeout: {timeout}s)...")
         
@@ -1129,8 +1297,14 @@ def _run_script_with_coordinates(script_name: str, main_window, keep_open: bool,
         )
     
     try:
-        # Bring window to front
-        force_foreground(main_window)
+        # Bring window to front — coordinate clicks land on whatever is on top,
+        # so a background QA window would send clicks into another application
+        if not force_foreground(main_window):
+            raise RuntimeError(
+                "Could not bring the Quant Analyzer window to the foreground.\n"
+                f"Currently on top: {describe_foreground()}\n"
+                "Refusing to send coordinate clicks that would land in another application."
+            )
 
         # Step 2: Click on Scripter in the left menu
         print("\nStep 2: Clicking on Scripter panel...")
