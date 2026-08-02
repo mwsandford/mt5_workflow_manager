@@ -905,6 +905,18 @@ def main():
     print_cyan("=" * 60)
     print_green("Dashboard update complete!")
     print_cyan("=" * 60)
+    print()
+
+    # Open the finished dashboard. Step 7 deliberately leaves this to us so the
+    # browser shows the complete report — both grids plus the correlation sections.
+    try:
+        import webbrowser
+        dashboard_url = 'file:///' + os.path.abspath(html_path).replace('\\', '/')
+        print_gray("Opening dashboard in browser...")
+        webbrowser.open(dashboard_url)
+    except Exception as exc:
+        print_yellow(f"  Could not open the dashboard automatically: {exc}")
+        print_gray(f"  Open it manually: {html_path}")
 
 
 if __name__ == '__main__':
