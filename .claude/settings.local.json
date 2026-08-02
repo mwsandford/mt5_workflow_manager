@@ -27,7 +27,8 @@
       "Bash(node test_overview_panel.js)",
       "Bash(grep *)",
       "Read(//c/Users/msand/.mt5_workflow/**)",
-      "PowerShell(Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { \"{0} Primary={1} Bounds={2} Working={3}\" -f $_.DeviceName, $_.Primary, $_.Bounds, $_.WorkingArea }; \"VirtualScreen: \" + [System.Windows.Forms.SystemInformation]::VirtualScreen)"
+      "PowerShell(Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.Screen]::AllScreens | ForEach-Object { \"{0} Primary={1} Bounds={2} Working={3}\" -f $_.DeviceName, $_.Primary, $_.Bounds, $_.WorkingArea }; \"VirtualScreen: \" + [System.Windows.Forms.SystemInformation]::VirtualScreen)",
+      "PowerShell(Remove-Item *)"
     ]
   }
 }

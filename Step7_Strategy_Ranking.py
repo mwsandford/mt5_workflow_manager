@@ -272,35 +272,6 @@ def load_mc_results(csv_path, threshold=DEFAULT_MC95_THRESHOLD):
     return passing_names, mc95_data, mc_failed
 
 
-def load_mc_ranked(csv_path):
-    """Load MC_Ranked.csv (from MCFilterRejects / MCRankExport Java snippet).
-
-    Returns:
-        dict of {normalised_name: rank_int}
-    """
-    try:
-        df = pd.read_csv(csv_path, on_bad_lines='skip')
-        df = df.dropna(subset=['Strategy']).reset_index(drop=True)
-        result = {}
-        for _, row in df.iterrows():
-            name = str(row['Strategy']).strip()
-            rank = int(float(row['Rank'])) if pd.notna(row.get('Rank')) else 0
-            # Normalise the same way as MC results names
-            for suffix in [' MT5', ' MT4', '_MT5', '_MT4']:
-                if name.endswith(suffix):
-                    name = name[:-len(suffix)]
-            # Convert SQX duplicate-suffix parentheses "(1)" to "_1_" so they
-            # match trade-CSV filenames where parens become underscores.
-            name = re.sub(r'\((\d+)\)', r'_\1_', name)
-            name = name.replace('_', ' ')
-            result[name] = rank
-        print(f"  Loaded MC ranks for {len(result)} strategies from {csv_path}")
-        return result
-    except Exception as e:
-        print(f"  WARNING: Could not load MC_Ranked.csv: {e}")
-        return {}
-
-
 def match_csv_to_mc(csv_name, mc_names):
     """Match a trade CSV strategy name to the MC results names.
 
@@ -1995,7 +1966,7 @@ def write_mt5_methodology_sheet(wb):
 # MAIN REPORT GENERATION
 # ============================================================================
 def generate_report(folder_path, strategies, stats, names, mt5_folder=None,
-                    mc95_data=None, mc_failed=None, mc_rank_data=None):
+                    mc95_data=None, mc_failed=None):
     wb = Workbook()
     n = len(names)
 
@@ -2166,7 +2137,6 @@ def generate_report(folder_path, strategies, stats, names, mt5_folder=None,
             strategy_scores=strategy_scores,
             strategy_codes=strategy_codes,
             sqx_metadata=sqx_metadata,
-            mc_rank_data=mc_rank_data,
         )
         dashboard_size = os.path.getsize(dashboard_path)
         print(f"  Dashboard saved to: {dashboard_path} ({dashboard_size:,} bytes)")
@@ -2264,7 +2234,7 @@ def generate_dashboard(folder_path, strategies, stats, names, ranked_df=None,
                        mt5_metrics=None, mt5_folder=None, chart_map=None,
                        mc95_data=None, mc_failed=None, mt5_overviews=None,
                        strategy_scores=None,
-                       strategy_codes=None, sqx_metadata=None, mc_rank_data=None):
+                       strategy_codes=None, sqx_metadata=None):
     """Generate the HTML dashboard.
 
     The correlation / cluster / portfolio sections are emitted empty here — they
@@ -2293,18 +2263,6 @@ def generate_dashboard(folder_path, strategies, stats, names, ranked_df=None,
         chart_map = {}
     if mc95_data is None:
         mc95_data = {}
-    if mc_rank_data is None:
-        mc_rank_data = {}
-
-    def _get_mc_rank(name):
-        """Look up MC fan score rank for a strategy name."""
-        matched = match_csv_to_mc(name, set(mc_rank_data.keys()))
-        if matched and matched in mc_rank_data:
-            return mc_rank_data[matched]
-        norm = name.replace('_', ' ')
-        if norm in mc_rank_data:
-            return mc_rank_data[norm]
-        return None
 
     def _get_direction(name):
         """Resolve strategy direction.
@@ -2370,7 +2328,6 @@ def generate_dashboard(folder_path, strategies, stats, names, ranked_df=None,
         for _, row in ranked_df.iterrows():
             name = row.get('Strategy', '')
             mc = _get_mc95(name)
-            mc_rank = _get_mc_rank(name)
             ranking_data.append({
                 'rank': _safe(row.get('Rank', 0), as_int=True),
                 'name': name,
@@ -2379,8 +2336,7 @@ def generate_dashboard(folder_path, strategies, stats, names, ranked_df=None,
                 'net_profit': _safe(row.get('Total Net Profit', 0)),
                 'ret_dd': _safe(row.get('Ret/DD Ratio', 0)),
                 'mc95_ret_dd': mc.get('mc95_ret_dd', 0),
-                'mc95_ret_dd_tick': None,  # Placeholder for tick-based MC95 Ret/DD (populated by Step9)
-                'mc_rank': mc_rank,
+                'mc95_ret_dd_tick': None,  # Placeholder for tick-based MC95 Ret/DD (populated by Step8)
                 'wl_ratio': _safe(row.get('Win/Loss Ratio', 0)),
                 'pf': _safe(row.get('Profit Factor', 0)),
                 'sharpe': _safe(row.get('Sharpe Ratio', 0)),
@@ -3504,7 +3460,7 @@ JS_BLOCK = r"""
     // M1 Monte Carlo value; on the Tick grid it is the tick Monte Carlo value.
     const headers = [
       {label:'#'}, {label:'Strategy', text:true, rawHtml:true}, {label:'Score'}, {label:'Net Profit'},
-      {label:'Ret/DD'}, {label:'MC95 Ret/DD'}, {label:'MC Rank'}, {label:'W/L'}, {label:'PF'}, {label:'Sharpe'},
+      {label:'Ret/DD'}, {label:'MC95 Ret/DD'}, {label:'W/L'}, {label:'PF'}, {label:'Sharpe'},
       {label:'Recovery'}, {label:'LR Corr'}, {label:'Win%'}, {label:'Trades'},
       {label:'DD ($)'}, {label:'DD %'}, {label:'Analyze', noSort:true, rawHtml:true}
     ];
@@ -3554,7 +3510,7 @@ JS_BLOCK = r"""
 
         const row = [
           r.rank, nameDisplay, r.score, '$' + (r.net_profit || 0).toLocaleString(undefined, {minimumFractionDigits:2}),
-          r.ret_dd, r.mc95_ret_dd || '—', r.mc_rank != null ? r.mc_rank : '—', r.wl_ratio, r.pf, r.sharpe,
+          r.ret_dd, r.mc95_ret_dd || '—', r.wl_ratio, r.pf, r.sharpe,
           r.recovery, r.lr_corr, r.win_rate + '%', r.trades,
           '$' + (r.dd_dollar || 0).toLocaleString(undefined, {minimumFractionDigits:2}), r.dd_pct + '%',
           `<div class="btn-group">${ovBtn}${codeBtn}${chartBtn}${exportBtn}</div>`
@@ -3946,7 +3902,6 @@ def main():
     mt5_folder = None
     mc_results_path = None
     mc95_threshold = DEFAULT_MC95_THRESHOLD
-    mc_ranked_path = None
 
     args = sys.argv[1:]
     i = 0
@@ -3956,9 +3911,6 @@ def main():
             i += 2
         elif args[i] == '--mc-results' and i + 1 < len(args):
             mc_results_path = args[i + 1]
-            i += 2
-        elif args[i] == '--mc-ranked' and i + 1 < len(args):
-            mc_ranked_path = args[i + 1]
             i += 2
         elif args[i] == '--mc95-threshold' and i + 1 < len(args):
             mc95_threshold = float(args[i + 1])
@@ -4008,19 +3960,6 @@ def main():
     else:
         print("\n  No --mc-results provided - analysing all trade CSVs")
 
-    # Auto-detect MC_Ranked.csv in the folder if not explicitly provided
-    if mc_ranked_path is None:
-        auto_ranked = os.path.join(folder_path, 'MC_Ranked.csv')
-        if os.path.isfile(auto_ranked):
-            mc_ranked_path = auto_ranked
-            print(f"\n  Auto-detected MC_Ranked.csv in folder")
-
-    mc_rank_data = {}
-    if mc_ranked_path:
-        mc_ranked_path = os.path.abspath(mc_ranked_path)
-        print(f"\nLoading MC Ranked data: {mc_ranked_path}")
-        mc_rank_data = load_mc_ranked(mc_ranked_path)
-
     print()
 
     # Step 2: Load trade CSVs (filtered to MC-passing strategies if applicable)
@@ -4066,7 +4005,6 @@ def main():
         folder_path, strategies, stats, names,
         mt5_folder=mt5_folder,
         mc95_data=mc95_data, mc_failed=mc_failed,
-        mc_rank_data=mc_rank_data,
     )
 
     print(f"\n{Colors.CYAN}{'=' * 60}{Colors.RESET}")

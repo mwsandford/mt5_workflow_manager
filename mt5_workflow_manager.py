@@ -74,8 +74,6 @@ class Theme:
     SECTION_BACKTEST_BG    = "rgba(245, 158, 11, 0.08)"  # Amber at 8% opacity
     SECTION_MONTECARLO     = "#10b981"  # Teal/emerald for Monte Carlo section
     SECTION_MONTECARLO_BG  = "rgba(16, 185, 129, 0.08)"  # Teal at 8% opacity
-    SECTION_TICKSURVIVAL   = "#ec4899"  # Magenta for Tick Survival section
-    SECTION_TICKSURVIVAL_BG = "rgba(236, 72, 153, 0.08)"  # Magenta at 8% opacity
 
     # Button colours
     BTN_RUN          = "#238636"
@@ -133,9 +131,6 @@ class Settings:
 
     # Tick backtesting
     TickBacktestCount: str = "20"  # Top N strategies (by M1 rank) to back test on real ticks
-
-    # Tick Survival Analysis
-    TickSurvivalThreshold: str = "2.0"  # MC95 Tick at or above which a strategy is "survived"
 
     # Workflow Options
     SequentialExecution: bool = False  # Run Back Test and Monte Carlo steps sequentially
@@ -303,23 +298,6 @@ def build_tick_montecarlo_steps() -> list[WorkflowStep]:
                 "--top-n", s.TickBacktestCount,
             ],
             depends_on="tick_mc_analysis",
-        ),
-    ]
-
-
-def build_tick_survival_steps() -> list[WorkflowStep]:
-    """Build Tick Survival Analysis steps."""
-    return [
-        WorkflowStep(
-            id="tick_survival_update",
-            title="Step 1 — Update Tick Survival Dashboard",
-            description="Parse the latest run, update the persistent SQLite store, regenerate the survival dashboard, and open it in the browser",
-            script_name="Step10_Update_Tick_Survival.py",
-            build_args=lambda s: [
-                "--dashboard-folder", os.path.join(s.BacktestOutputFolder, "Dashboard"),
-                "--output-folder", s.BacktestOutputFolder,
-                "--tick-threshold", s.TickSurvivalThreshold,
-            ],
         ),
     ]
 
@@ -877,7 +855,6 @@ class SettingsPanel(QWidget):
         ("QAPath", "Quant Analyzer Exe", False, False),
         ("MC95Threshold", "95% Confidence Level", False, False),
         ("TickBacktestCount", "Tick Back Test Count", False, False),
-        ("TickSurvivalThreshold", "Tick Survival MC95 Min", False, False),
     ]
 
     def __init__(self, parent=None):
@@ -1408,7 +1385,6 @@ class WorkflowWindow(QMainWindow):
         self.backtest_steps = build_backtest_steps()
         self.montecarlo_steps = build_montecarlo_steps()
         self.tick_montecarlo_steps = build_tick_montecarlo_steps()
-        self.tick_survival_steps = build_tick_survival_steps()
 
         # Current running process (subprocess.Popen)
         self.current_process = None
@@ -1623,16 +1599,6 @@ class WorkflowWindow(QMainWindow):
         self.tick_montecarlo_section.step_run_requested.connect(self._on_run_step)
         scroll_layout.addWidget(self.tick_montecarlo_section)
 
-        # Tick Survival Analysis Section
-        self.tick_survival_section = WorkflowSection(
-            "Tick Survival Analysis",
-            Theme.SECTION_TICKSURVIVAL,
-            Theme.SECTION_TICKSURVIVAL_BG,
-            self.tick_survival_steps
-        )
-        self.tick_survival_section.step_run_requested.connect(self._on_run_step)
-        scroll_layout.addWidget(self.tick_survival_section)
-
         scroll_layout.addStretch()
         scroll.setWidget(scroll_content)
         left_layout.addWidget(scroll, 1)
@@ -1688,12 +1654,11 @@ class WorkflowWindow(QMainWindow):
 
     def _get_sequential_steps(self) -> list[WorkflowStep]:
         """Get the ordered list of steps for sequential execution."""
-        # Backtest steps → Monte Carlo M1 → Tick MC → Tick Survival analysis
+        # Backtest steps → Monte Carlo M1 → Tick MC
         return (
             self.backtest_steps
             + self.montecarlo_steps
             + self.tick_montecarlo_steps
-            + self.tick_survival_steps
         )
 
     def _get_next_sequential_step(self, current_step_id: str) -> Optional[WorkflowStep]:
@@ -1748,12 +1713,6 @@ class WorkflowWindow(QMainWindow):
             if card:
                 card.set_sequential_waiting(True)  # All Tick MC steps show WAITING initially
 
-        # Update tick survival section
-        for step in self.tick_survival_steps:
-            card = self.tick_survival_section.cards.get(step.id)
-            if card:
-                card.set_sequential_waiting(True)  # Waits until Tick MC completes
-
     def _restore_normal_button_states(self):
         """Restore normal button states (non-sequential mode)."""
         # Update backtest section - all ready
@@ -1776,13 +1735,6 @@ class WorkflowWindow(QMainWindow):
                 card.set_sequential_waiting(False)
         self.tick_montecarlo_section._update_dependencies(enforce=False)
 
-        # Update tick survival section - clear waiting and don't enforce dependencies
-        for step in self.tick_survival_steps:
-            card = self.tick_survival_section.cards.get(step.id)
-            if card:
-                card.set_sequential_waiting(False)
-        self.tick_survival_section._update_dependencies(enforce=False)
-
     def _find_card(self, step_id: str) -> Optional[StepCard]:
         card = self.data_section.get_card(step_id)
         if card:
@@ -1793,10 +1745,7 @@ class WorkflowWindow(QMainWindow):
         card = self.montecarlo_section.get_card(step_id)
         if card:
             return card
-        card = self.tick_montecarlo_section.get_card(step_id)
-        if card:
-            return card
-        return self.tick_survival_section.get_card(step_id)
+        return self.tick_montecarlo_section.get_card(step_id)
 
     def _find_section(self, step_id: str) -> Optional[WorkflowSection]:
         """Find which section contains the given step."""
@@ -1808,8 +1757,6 @@ class WorkflowWindow(QMainWindow):
             return self.montecarlo_section
         if self.tick_montecarlo_section.get_card(step_id):
             return self.tick_montecarlo_section
-        if self.tick_survival_section.get_card(step_id):
-            return self.tick_survival_section
         return None
 
     def _set_all_buttons_enabled(self, enabled: bool):
@@ -1817,7 +1764,6 @@ class WorkflowWindow(QMainWindow):
         self.backtest_section.set_all_buttons_enabled(enabled)
         self.montecarlo_section.set_all_buttons_enabled(enabled)
         self.tick_montecarlo_section.set_all_buttons_enabled(enabled)
-        self.tick_survival_section.set_all_buttons_enabled(enabled)
 
     def _get_scripts_folder(self) -> str:
         """Get the folder where workflow scripts are located (same folder as this GUI/exe)."""

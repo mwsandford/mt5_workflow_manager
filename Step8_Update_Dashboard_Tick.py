@@ -18,11 +18,10 @@ It updates:
                           keeps ranking[].mc95_ret_dd_tick populated, and fills
                           the correlation-driven sections (portfolio / corr_names
                           / correlations / clusters / best_pairs / cards)
-  - strategies_data.json - the same updates, for downstream consumers (Step 10)
+  - strategies_data.json - the same updates, for downstream consumers
 
 The tick grid is built with the exact same parser + scoring as the M1 grid by
 reusing Step 7's parse_mt5_report() / compute_mt5_rankings(), so metrics line up.
-ranking[].mc95_ret_dd_tick is still populated (Step 10 / Tick Survival depends on it).
 
 Correlation check
 -----------------
@@ -285,8 +284,7 @@ def build_tick_ranking(reports_folder: str, mc_results: dict, m1_names: list) ->
 
     Mirrors the row shape produced by Step 7's ranking_data so the dashboard's
     Tick grid renders identically to the M1 grid. The MC95 Ret/DD column carries
-    the *tick* Monte Carlo value; Score is recomputed on the tick metrics; MC Rank
-    has no tick equivalent (left as None -> shows '—').
+    the *tick* Monte Carlo value; Score is recomputed on the tick metrics.
 
     Returns (tick_ranking, report_by_name) — the report map feeds the correlation
     check, which needs the Deals table from each report.
@@ -343,7 +341,6 @@ def build_tick_ranking(reports_folder: str, mc_results: dict, m1_names: list) ->
             # MC95 Ret/DD column on the Tick grid == tick Monte Carlo value
             'mc95_ret_dd': _rnd(mc95_tick) if mc95_tick is not None else 0,
             'mc95_ret_dd_tick': _rnd(mc95_tick) if mc95_tick is not None else None,
-            'mc_rank': None,  # no tick MC_Ranked.csv -> renders as '—'
             'wl_ratio': _rnd(row.get('Win/Loss Ratio')),
             'pf': _rnd(row.get('Profit Factor')),
             'sharpe': _rnd(row.get('Sharpe Ratio')),

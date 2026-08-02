@@ -34,7 +34,7 @@ PySide6, pyautogui, pywinauto, psutil, opencv-python, pandas, openpyxl, matplotl
 - `WorkflowStep` (dataclass) — step definition with `id`, `title`, `description`, `script_name`, `build_args` callback, `depends_on` chain, and optional confirm-dialog mode (`is_confirmation` + `confirmation_message`) for user-gated pseudo-steps that don't launch a subprocess
 - `Settings` (dataclass) — all user configuration, persisted as JSON
 - `StepCard` — individual step UI widget with status indicator and run/confirm button
-- `WorkflowSection` — grouped section of related steps. Five sections are instantiated with these display titles: "Update MetaTrader Data", "Back Test MetaTrader Expert Advisors", "Monte Carlo Analysis - M1", "Monte Carlo Analysis - Tick", and "Tick Survival Analysis"
+- `WorkflowSection` — grouped section of related steps. Four sections are instantiated with these display titles: "Update MetaTrader Data", "Back Test MetaTrader Expert Advisors", "Monte Carlo Analysis - M1", and "Monte Carlo Analysis - Tick"
 - `Theme` — dark theme color constants (GitHub dark mode inspired)
 - `StepStatus` (enum) — IDLE, RUNNING, COMPLETE, FAILED
 
@@ -54,9 +54,8 @@ PySide6, pyautogui, pywinauto, psutil, opencv-python, pandas, openpyxl, matplotl
 | 6 | Step6_Run_QA_Script.py | Monte Carlo | Automate Quant Analyzer scripting (pywinauto + image recognition) |
 | 7 | Step7_Strategy_Ranking.py | Monte Carlo | Composite-score ranking, Excel + HTML dashboard generation |
 | 8 | Step8_Update_Dashboard_Tick.py | Monte Carlo (Tick) | Merge tick MC results into run-level Dashboard + run the tick correlation check |
-| 10 | Step10_Update_Tick_Survival.py | Tick Survival Analysis | Update persistent SQLite store + regenerate cross-run survival dashboard |
 
-Note: Step 9 does not exist (number reserved). Steps 5/6 have "tick" variants (5b/6b) configured in the GUI.
+Note: Step 8 is the last step — Steps 9 and 10 do not exist. Steps 5/6 have "tick" variants (5b/6b) configured in the GUI.
 
 ## Dashboard Column Provenance (MT5 Backtest Rankings table)
 
@@ -66,7 +65,7 @@ The run-level Dashboard runs **two separate MT5 backtests** against the same EAs
 
 Every column in the "MT5 Backtest Rankings" table is sourced from the **1-minute-OHLC pipeline**, *except* `MC95 Tick`:
 - **SCORE, NET PROFIT, RET/DD, W/L, PF, SHARPE, RECOVERY, LR CORR, WIN%, TRADES, DD($), DD%** — parsed directly from the M1 MT5 Strategy Tester `.htm` reports (`parse_mt5_report`) plus trade CSVs, in `Step7_Strategy_Ranking.py`.
-- **MC95 RET/DD** and **MC RANK** — derived from the Monte Carlo pass (`BatchMC_Results.csv` / `MC_Ranked.csv`) run *on the M1 backtest* (Step 6).
+- **MC95 RET/DD** — derived from the Monte Carlo pass (`BatchMC_Results.csv`) run *on the M1 backtest* (Step 6).
 - **MC95 TICK** — the only column from the tick model. Step 7 emits it as a `None` placeholder (`ranking[].mc95_ret_dd_tick`); `Step8_Update_Dashboard_Tick.py` fills it from `ticks/BatchMC_Results.csv` (Monte Carlo on the tick backtest).
 
 ## Strategy Correlation Check (Step 8, tick data only)
@@ -81,22 +80,6 @@ The correlation / cluster / KEEP-ABANDON check runs on the **tick** backtest res
 **Where it surfaces**: ✗ ABANDON badges + dimmed rows on the **Tick** grid only (the M1 grid never shows them), plus the Portfolio, Correlation and Clusters tabs and the Tick Clusters / Tick Keep / Tick Abandon summary cards. Before Step 8 runs, those tabs show an empty state.
 
 **Step 7's correlation functions are still live** — `build_pnl_series`, `compute_pairwise_correlation` and `identify_clusters` remain in `Step7_Strategy_Ranking.py` because Step 8 imports them. Trade-overlap analysis was removed entirely (it needed trade open times, which the Deals table doesn't expose directly).
-
-## Tick Survival Analysis (Step 10)
-
-A persistent, cross-run analytics store that accumulates strategy characteristics joined to backtest results and renders an HTML survival-analysis dashboard.
-
-**Why separate from the run-level Dashboard**: `BacktestOutputFolder` is wiped every run, so anything needing to build up history across runs must live outside it. The tick_survival store lives inside the Workflow Manager folder.
-
-**Layout**:
-- `tick_survival/db.py` — stdlib `sqlite3` schema + upsert helpers. Two tables: `Strategies` (natural key `StrategyName`), `BacktestResults` (`UNIQUE(StrategyID, BatchID)`)
-- `tick_survival/parser.py` — reads `Dashboard/strategies_data.json` + embedded `const DATA` from `Dashboard/index.html`; falls back to re-running Step 7's `parse_strategy_pseudo_code` for missing entries
-- `tick_survival/dashboard.py` — self-contained dark-theme HTML with filter bar, 12 survival-by-characteristic tables, Bayesian-shrunk predictive ranking, expandable per-strategy history
-- `tick_survival/tick_survival.db` — persistent store (never checked into the run output folder)
-- `tick_survival/reports/tick_survival_dashboard.html` — generated view, rebuilt from the DB every run
-- `Step10_Update_Tick_Survival.py` — CLI orchestrator: parse → upsert → regenerate HTML → `webbrowser.open()`
-
-**Scope**: only the tick-tested strategies per batch are stored (records where `ranking.mc95_ret_dd_tick is not None` — top 20 by default, per `Settings.TickBacktestCount`). Re-running Step 10 against the same folder upserts; new runs accumulate as history rows. Pass threshold defaults to MC95 Tick ≥ 2.0 (configurable via `Settings.TickSurvivalThreshold` in the GUI and `--tick-threshold` CLI arg).
 
 ## Configuration
 
