@@ -385,6 +385,10 @@ def parse_mt5_report(filepath):
     metrics['Profit Factor'] = extract_float('Profit Factor')
     metrics['Expected Payoff'] = extract_float('Expected Payoff')
     metrics['Recovery Factor'] = extract_float('Recovery Factor')
+    # Sharpe Ratio is taken verbatim from MT5 and is deliberately NOT recomputed.
+    # MT5's convention runs ~4x a conventional annualised Sharpe and ~40x the
+    # per-trade figure StrategyQuant shows, so it will never line up with SQX —
+    # that is expected. The dashboard mirrors the MT5 report, not SQX.
     metrics['Sharpe Ratio'] = extract_float('Sharpe Ratio')
     metrics['LR Correlation'] = extract_float('LR Correlation')
     metrics['LR Standard Error'] = extract_float('LR Standard Error')
@@ -439,7 +443,11 @@ def parse_mt5_report(filepath):
     m = re.search(r'Average consecutive losses:\|(\d+)', text)
     if m: metrics['Avg Consecutive Losses'] = int(m.group(1))
 
-    # Ret/DD Ratio: Total Profit / Balance DD Maximal (matches QA4)
+    # Ret/DD Ratio: Total Profit / Balance DD Maximal. MT5 publishes no Ret/DD
+    # field, so this is derived — both inputs come straight from the MT5 report.
+    # Balance DD (not Equity DD) is the deliberate choice: dividing by Equity DD
+    # would reproduce MT5's own Recovery Factor exactly, making this column a
+    # duplicate of Recovery. Keeping Balance DD gives two distinct DD views.
     if metrics.get('Total Net Profit') and metrics.get('Balance DD Max $') and metrics['Balance DD Max $'] > 0:
         metrics['Ret/DD Ratio'] = metrics['Total Net Profit'] / metrics['Balance DD Max $']
 
@@ -756,7 +764,8 @@ def parse_mt5_full_overview(filepath):
     m = re.search(r'Average consecutive losses:\|(\d+)', text)
     o['avg_consec_losses'] = int(m.group(1)) if m else 0
 
-    # Derived: Ret/DD uses Balance DD Maximal (matches QA4)
+    # Derived: Ret/DD uses Balance DD Maximal — see parse_mt5_report() for why
+    # Balance DD rather than Equity DD (Equity DD would duplicate Recovery Factor)
     if o['bal_dd_max'] > 0:
         o['ret_dd'] = round(o['total_profit'] / o['bal_dd_max'], 2)
     else:
@@ -2143,11 +2152,11 @@ def generate_report(folder_path, strategies, stats, names, mt5_folder=None,
         if dashboard_size == 0:
             print("  WARNING: Dashboard file is empty - check for errors above.")
         else:
-            # Auto-open dashboard in default browser
-            import webbrowser
-            dashboard_url = 'file:///' + os.path.abspath(dashboard_path).replace('\\', '/')
-            print(f"  Opening dashboard in browser...")
-            webbrowser.open(dashboard_url)
+            # Deliberately NOT opened here. At this point the dashboard still has an
+            # empty Tick grid and empty Portfolio/Correlation/Clusters tabs, which
+            # Step8_Update_Dashboard_Tick.py fills in. Step 8 opens the browser once
+            # the report is complete.
+            print("  Dashboard will open in the browser after Step 8 adds the tick results.")
     except Exception as e:
         import traceback
         print(f"  WARNING: Dashboard generation failed: {e}")

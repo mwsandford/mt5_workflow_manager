@@ -53,7 +53,7 @@ PySide6, pyautogui, pywinauto, psutil, opencv-python, pandas, openpyxl, matplotl
 | 5 | Step5_MT5_Backtest.py | Backtest | Run backtests via MT5 terminal CLI with INI files |
 | 6 | Step6_Run_QA_Script.py | Monte Carlo | Automate Quant Analyzer scripting (pywinauto + image recognition) |
 | 7 | Step7_Strategy_Ranking.py | Monte Carlo | Composite-score ranking, Excel + HTML dashboard generation |
-| 8 | Step8_Update_Dashboard_Tick.py | Monte Carlo (Tick) | Merge tick MC results into run-level Dashboard + run the tick correlation check |
+| 8 | Step8_Update_Dashboard_Tick.py | Monte Carlo (Tick) | Merge tick MC results into run-level Dashboard + run the tick correlation check + open the finished Dashboard in the browser |
 
 Note: Step 8 is the last step — Steps 9 and 10 do not exist. Steps 5/6 have "tick" variants (5b/6b) configured in the GUI.
 
@@ -67,6 +67,13 @@ Every column in the "MT5 Backtest Rankings" table is sourced from the **1-minute
 - **SCORE, NET PROFIT, RET/DD, W/L, PF, SHARPE, RECOVERY, LR CORR, WIN%, TRADES, DD($), DD%** — parsed directly from the M1 MT5 Strategy Tester `.htm` reports (`parse_mt5_report`) plus trade CSVs, in `Step7_Strategy_Ranking.py`.
 - **MC95 RET/DD** — derived from the Monte Carlo pass (`BatchMC_Results.csv`) run *on the M1 backtest* (Step 6).
 - **MC95 TICK** — the only column from the tick model. Step 7 emits it as a `None` placeholder (`ranking[].mc95_ret_dd_tick`); `Step8_Update_Dashboard_Tick.py` fills it from `ticks/BatchMC_Results.csv` (Monte Carlo on the tick backtest).
+
+### Deliberate mismatches with StrategyQuant
+
+The dashboard mirrors **MetaTrader 5's backtest report**, not StrategyQuant X. Two columns will therefore never agree with SQX, by design — do not "fix" them:
+
+- **SHARPE** — read verbatim from the MT5 `.htm`. MT5's convention is roughly **4x** a conventional annualised Sharpe and **~40x** the per-trade Sharpe SQX reports (measured across 97 reports: MT5 median 3.66, annualised median 0.87, per-trade median 0.093). Note this is not a monotone transform of a correct Sharpe — rank correlation against annualised Sharpe is only ~0.25, and it tracks *per-trade* Sharpe (~0.87), so it systematically favours low-frequency strategies. Relevant because Sharpe carries 11% of the composite score.
+- **RET/DD** — derived, since MT5 publishes no such field: `Total Net Profit / Balance Drawdown Maximal`, both straight from the MT5 report. Dividing by *Equity* Drawdown Maximal instead would reproduce MT5's own **Recovery Factor** exactly (verified identical across all 97 reports), collapsing two columns into one — hence Balance DD is used to keep the balance-DD and equity-DD views distinct.
 
 ## Strategy Correlation Check (Step 8, tick data only)
 
